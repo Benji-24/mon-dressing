@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Mon dressing</title>
+  <meta name="description" content="Mon dressing — ton dressing intelligent">
+  <meta name="theme-color" content="#0B0B0C">
+  <meta name="color-scheme" content="dark">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Mon dressing">
+  <meta name="format-detection" content="telephone=no">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <div id="app">
+    <main id="view" class="view" tabindex="-1"></main>
+    <nav id="tabbar" class="tabbar" aria-label="Navigation principale"></nav>
+  </div>
+  <div id="sheet-root"></div>
+  <div id="toast-root" aria-live="polite"></div>
+  <noscript><p style="color:#fff;padding:24px">Mon dressing a besoin de JavaScript.</p></noscript>
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>

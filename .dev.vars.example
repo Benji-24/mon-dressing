@@ -1,0 +1,3 @@
+# Copie ce fichier en .dev.vars pour tester l'IA sur ton ordinateur (jamais publié)
+GEMINI_API_KEY=colle-ta-cle-ici
+APP_PASSWORD=choisis-un-mot-de-passe
