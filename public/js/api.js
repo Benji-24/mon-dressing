@@ -37,7 +37,7 @@ async function call(path, body, { timeout = 45000 } = {}) {
 
 export const api = {
   health: () => call('/api/health'),
-  analyze: (image, mimeType, gender) => call('/api/analyze', { image, mimeType, gender }),
+  analyze: (image, mimeType, gender) => call('/api/analyze', { image, mimeType, gender }, { timeout: 70000 }),
   style: (payload) => call('/api/style', payload, { timeout: 60000 }),
 };
 

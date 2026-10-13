@@ -544,11 +544,13 @@ function openItemForm(existing = null, { startWith } = {}) {
       } catch (e) { toast(e.message || 'Photo illisible.', { type: 'error' }); }
     }
     keepScroll(() => sh.refresh());
-    if (first && d.photos.length) runSticker();
+    // L'analyse IA passe en premier : la découpe du sticker occupe le processeur du téléphone
+    // et ralentirait la réponse du serveur si les deux tournaient en même temps.
     if (first && analysisBlob && !existing) {
-      if (aiReady()) runAnalysis(analysisBlob);
+      if (aiReady()) await runAnalysis(analysisBlob);
       else { ai.status = 'off'; ai.msg = aiOffReason(); keepScroll(() => sh.refresh()); }
     }
+    if (first && d.photos.length && !sh.closed) runSticker();
   }
 
   async function runSticker() {
