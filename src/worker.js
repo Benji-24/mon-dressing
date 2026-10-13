@@ -53,35 +53,75 @@ async function handleApi(request, env, url) {
 }
 
 // ---------------- Appel Gemini ----------------
+const API = 'https://generativelanguage.googleapis.com/v1beta';
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Liste les modèles « flash » réellement disponibles pour cette clé (secours si les noms par défaut ont changé).
+async function discoverModels(env, exclude) {
+  try {
+    const res = await fetch(`${API}/models?pageSize=200`, { headers: { 'x-goog-api-key': env.GEMINI_API_KEY }, signal: AbortSignal.timeout(10000) });
+    if (!res.ok) return [];
+    const { models = [] } = await res.json();
+    const score = (n) => (/latest/.test(n) ? 1000 : 0) + (parseFloat((n.match(/(\d+(?:\.\d+)?)/) || [0])[1]) || 0) * 10 - (/lite/.test(n) ? 5 : 0);
+    return models
+      .filter((m) => (m.supportedGenerationMethods || []).includes('generateContent'))
+      .map((m) => String(m.name || '').replace(/^models\//, ''))
+      .filter((n) => /flash/.test(n) && !/(image|tts|audio|live|embed|robotics|computer|thinking|exp|preview-\d)/.test(n) && !exclude.includes(n))
+      .sort((x, y) => score(y) - score(x))
+      .slice(0, 3);
+  } catch { return []; }
+}
+
 export async function callGemini(env, parts, schema, { temperature = 0.4 } = {}) {
-  const models = (env.GEMINI_MODEL ? String(env.GEMINI_MODEL).split(',') : DEFAULT_MODELS).map((m) => m.trim()).filter(Boolean);
-  let lastErr = null;
-  for (const model of models) {
-    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-goog-api-key': env.GEMINI_API_KEY },
-      body: JSON.stringify({
-        contents: [{ role: 'user', parts }],
-        generationConfig: { temperature, responseMimeType: 'application/json', responseSchema: schema },
-      }),
-    });
-    if (res.status === 404) { lastErr = { status: 404 }; continue; } // modèle inexistant : on essaie le suivant
-    if (res.status === 429) throw new GeminiError('Limite gratuite de l\'IA atteinte pour le moment. Réessaie dans une minute (ou demain si le quota du jour est épuisé).', 429, 'rate-limit');
-    if (res.status === 400 || res.status === 403) {
-      const t = await res.text();
-      if (/API key|API_KEY|permission/i.test(t)) throw new GeminiError('Clé Gemini refusée par Google. Vérifie la clé enregistrée sur le serveur.', 502, 'bad-key');
-      if (/location|region|not supported/i.test(t)) throw new GeminiError('L\'offre gratuite Gemini n\'est pas disponible dans cette région.', 502, 'region');
-      throw new GeminiError('Google Gemini a refusé la demande.', 502, 'gemini-400');
+  const configured = (env.GEMINI_MODEL ? String(env.GEMINI_MODEL).split(',') : DEFAULT_MODELS).map((m) => m.trim()).filter(Boolean);
+  const t0 = Date.now();
+  const log = []; // ex. « gemini-flash-latest : 503 (overloaded) » — affiché pour comprendre une panne
+  const body = JSON.stringify({ contents: [{ role: 'user', parts }], generationConfig: { temperature, responseMimeType: 'application/json', responseSchema: schema } });
+
+  const post = async (model) => {
+    try {
+      return await fetch(`${API}/models/${encodeURIComponent(model)}:generateContent`, {
+        method: 'POST', headers: { 'content-type': 'application/json', 'x-goog-api-key': env.GEMINI_API_KEY }, body, signal: AbortSignal.timeout(25000),
+      });
+    } catch (e) { return { status: 0, ok: false, timeout: true, text: async () => '' }; }
+  };
+
+  const run = async (models) => {
+    for (const model of models) {
+      if (Date.now() - t0 > 45000) { log.push('délai dépassé'); break; }
+      let res = await post(model);
+      if ([0, 500, 502, 503, 504].includes(res.status)) { await sleep(1200); res = await post(model); } // surcharge passagère : un 2e essai
+      if (res.status === 404) { log.push(`${model} : introuvable`); continue; }
+      if (res.status === 429) throw new GeminiError('Limite gratuite de l\'IA atteinte pour le moment. Réessaie dans une minute (ou demain si le quota du jour est épuisé).', 429, 'rate-limit');
+      if (res.status === 400 || res.status === 403) {
+        const t = await res.text();
+        if (/API key|API_KEY|permission/i.test(t)) throw new GeminiError('Clé Gemini refusée par Google. Vérifie la clé enregistrée sur le serveur.', 502, 'bad-key');
+        if (/location|region|not supported/i.test(t)) throw new GeminiError('L\'offre gratuite Gemini n\'est pas disponible dans cette région.', 502, 'region');
+        log.push(`${model} : ${res.status} ${t.replace(/\s+/g, ' ').slice(0, 120)}`);
+        continue; // ce modèle n'accepte pas la requête : on tente le suivant
+      }
+      if (!res.ok) {
+        let t = ''; try { t = (await res.text()).replace(/\s+/g, ' ').slice(0, 120); } catch { /* ignore */ }
+        log.push(`${model} : ${res.timeout ? 'trop lent' : res.status}${t ? ' ' + t : ''}`);
+        continue;
+      }
+      const data = await res.json();
+      const cand = data.candidates?.[0];
+      const text = cand?.content?.parts?.map((p) => p.text || '').join('') || '';
+      if (!text) throw new GeminiError(cand?.finishReason === 'SAFETY' ? 'L\'IA a refusé d\'analyser cette image.' : 'L\'IA n\'a pas renvoyé de réponse.', 502, 'empty');
+      try { return { result: JSON.parse(text), model }; }
+      catch { throw new GeminiError('Réponse de l\'IA illisible. Réessaie.', 502, 'bad-output'); }
     }
-    if (!res.ok) { lastErr = { status: res.status }; continue; }
-    const data = await res.json();
-    const cand = data.candidates?.[0];
-    const text = cand?.content?.parts?.map((p) => p.text || '').join('') || '';
-    if (!text) throw new GeminiError(cand?.finishReason === 'SAFETY' ? 'L\'IA a refusé d\'analyser cette image.' : 'L\'IA n\'a pas renvoyé de réponse.', 502, 'empty');
-    try { return { result: JSON.parse(text), model }; }
-    catch { throw new GeminiError('Réponse de l\'IA illisible. Réessaie.', 502, 'bad-output'); }
+    return null;
+  };
+
+  const first = await run(configured);
+  if (first) return first;
+  if (!env.GEMINI_MODEL) {
+    const extra = await discoverModels(env, configured);
+    if (extra.length) { const second = await run(extra); if (second) return second; }
   }
-  throw new GeminiError(lastErr?.status === 404 ? 'Aucun modèle Gemini configuré n\'est disponible (variable GEMINI_MODEL).' : 'Service Gemini indisponible pour le moment.', 502, 'gemini-down');
+  throw new GeminiError(`Service Gemini indisponible pour le moment. Détail : ${log.slice(-4).join(' ; ') || 'aucune réponse'}.`, 502, 'gemini-down');
 }
 
 class GeminiError extends Error { constructor(m, status, code) { super(m); this.status = status; this.code = code; } }

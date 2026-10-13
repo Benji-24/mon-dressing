@@ -136,3 +136,37 @@ test('analyse : le profil masculin n\'autorise pas les robes dans le schéma env
   const enumF = JSON.parse(calls[1].init.body).generationConfig.responseSchema.properties.category.enum;
   assert.ok(enumF.includes('robes') && enumF.includes('jupes'));
 });
+
+const OK_ANALYSIS = { isClothing: true, name: 'x', category: 'hauts', primaryColor: 'noir', secondaryColors: [], fit: 'regular', style: 'casual', seasons: [], confidence: 'haute', remark: '' };
+const okBody = () => new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: JSON.stringify(OK_ANALYSIS) }] } }] }));
+
+test('surcharge passagère (503) : un second essai réussit', async () => {
+  let n = 0;
+  mockGemini(() => (++n === 1 ? new Response('overloaded', { status: 503 }) : okBody()));
+  const res = await worker.fetch(post('/api/analyze', { image: 'QUJD' }), ENV);
+  assert.equal(res.status, 200); assert.equal(n, 2);
+});
+
+test('noms de modèles périmés : découverte automatique d\'un modèle flash disponible', async () => {
+  const used = [];
+  mockGemini((url) => {
+    if (String(url).includes('/models?')) return new Response(JSON.stringify({ models: [
+      { name: 'models/gemini-9-flash', supportedGenerationMethods: ['generateContent'] },
+      { name: 'models/gemini-9-flash-image', supportedGenerationMethods: ['generateContent'] },
+      { name: 'models/embedding-1', supportedGenerationMethods: ['embedContent'] },
+    ] }));
+    used.push(String(url));
+    return String(url).includes('gemini-9-flash:') ? okBody() : new Response('nf', { status: 404 });
+  });
+  const res = await worker.fetch(post('/api/analyze', { image: 'QUJD' }), ENV);
+  assert.equal(res.status, 200);
+  assert.ok(used.some((u) => u.includes('gemini-9-flash:')) && !used.some((u) => u.includes('image')));
+});
+
+test('panne Google persistante : le message donne le détail', async () => {
+  mockGemini((url) => (String(url).includes('/models?') ? new Response('{}', { status: 500 }) : new Response('{"error":{"message":"The model is overloaded"}}', { status: 503 })));
+  const res = await worker.fetch(post('/api/analyze', { image: 'QUJD' }), ENV);
+  assert.equal(res.status, 502);
+  const j = await res.json();
+  assert.match(j.error, /503/); assert.match(j.error, /overloaded/);
+});
