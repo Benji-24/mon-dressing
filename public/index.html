@@ -18,6 +18,20 @@
   <link rel="stylesheet" href="app.css">
 </head>
 <body>
+  <div id="splash" aria-hidden="true">
+    <div class="splash-in">
+      <svg class="splash-mark" viewBox="64 24 384 376">
+        <g fill="none" stroke="currentColor" stroke-width="30" stroke-linecap="round" stroke-linejoin="round">
+          <path class="sp-hook" pathLength="1" d="M256 214v-26c0-14 8-20 22-24 22-6 38-22 38-48 0-28-24-48-52-48s-52 20-52 46"/>
+          <path class="sp-body" pathLength="1" d="M256 214 92 330c-18 13-10 40 12 40h304c22 0 30-27 12-40z"/>
+        </g>
+        <g class="sp-b" fill="none" stroke="#F4F4F5" stroke-width="17" stroke-linecap="round" stroke-linejoin="round" transform="translate(228 256) scale(1.05)">
+          <path pathLength="1" d="M0 0v66M0 0h30c14 0 22 9 22 19s-8 18-22 18H0M0 37h34c15 0 24 9 24 20s-9 18-24 18H0"/>
+        </g>
+      </svg>
+      <div class="splash-word"><span>Mon</span> <span>dressing</span></div>
+    </div>
+  </div>
   <div id="app">
     <main id="view" class="view" tabindex="-1"></main>
     <nav id="tabbar" class="tabbar" aria-label="Navigation principale"></nav>
@@ -25,6 +39,17 @@
   <div id="sheet-root"></div>
   <div id="toast-root" aria-live="polite"></div>
   <noscript><p style="color:#fff;padding:24px">Mon dressing a besoin de JavaScript.</p></noscript>
+  <script>
+    (function () {
+      var el = document.getElementById('splash');
+      if (!el) return;
+      var done = false;
+      function hide() { if (done) return; done = true; el.classList.add('out'); setTimeout(function () { el.remove(); }, 450); }
+      var reduce = window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches;
+      setTimeout(hide, reduce ? 500 : 2300);
+      el.addEventListener('click', hide);
+    })();
+  </script>
   <script type="module" src="js/app.js"></script>
 </body>
 </html>

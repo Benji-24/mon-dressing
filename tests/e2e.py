@@ -21,11 +21,14 @@ try:
         browser = p.chromium.launch()
         ctx = browser.new_context(viewport={'width': 402, 'height': 874}, device_scale_factor=3, is_mobile=True, has_touch=True,
                                   locale='fr-FR', geolocation={'latitude': 48.8566, 'longitude': 2.3522}, permissions=['geolocation'], accept_downloads=True)
+        SPLASH_OFF = "document.addEventListener('DOMContentLoaded', () => document.getElementById('splash')?.remove());"
+        ctx.add_init_script(SPLASH_OFF)
         page = ctx.new_page()
         errors = []
         page.on('pageerror', lambda e: errors.append(str(e)))
         page.on('console', lambda m: errors.append(m.text) if m.type == 'error' and 'favicon' not in m.text else None)
         page.route('https://api.open-meteo.com/**', lambda r: r.fulfill(json={'current': {'temperature_2m': 11.2, 'apparent_temperature': 9.4, 'weather_code': 61, 'precipitation': 0.4}, 'daily': {'temperature_2m_min': [7], 'temperature_2m_max': [13]}}))
+        page.route('https://cdn.jsdelivr.net/**', lambda r: r.abort())  # détourage IA injoignable → on teste le secours
         S = lambda: page.evaluate('window.__drip.state')
         shot = lambda n: page.screenshot(path=str(SHOTS / f'{n}.png'))
 
@@ -67,12 +70,28 @@ try:
         check('Champs IA signalés « à vérifier »', page.locator('.ai-tag').count() >= 5)
         check('Marque non inventée', page.input_value('#f-brand') == '')
         shot('02-ajout-ia')
+        # Sticker : le détourage IA (CDN) est volontairement injoignable ici → secours « fond uni »
+        page.wait_for_selector('text=Sticker prêt', timeout=30000)
+        check('Sticker créé à l\'ajout (secours fond uni)', page.locator('.sticker-row').count() == 1 and 'découpe simple' in page.locator('.sticker-row').inner_text())
+        shot('02b-sticker')
         page.fill('#f-name', 'Hoodie gris oversize')
         page.fill('#f-size', 'L')
         page.click('[data-k="style"][data-v="casual"]')  # correction d'un champ
         page.click('[data-save]')
         check('Pièce photo enregistrée', toast_has('ajouté à ton dressing'))
         page.wait_for_timeout(400)
+        sticker_id = page.evaluate("window.__drip.state.items[0].sticker")
+        check('Sticker enregistré avec la pièce', bool(sticker_id))
+        px = page.evaluate('''async (id) => {
+          const { db } = await import('/js/db.js');
+          const rec = await db.get('photos', id);
+          const bmp = await createImageBitmap(new Blob([rec.data], { type: rec.type }));
+          const c = document.createElement('canvas'); c.width = bmp.width; c.height = bmp.height;
+          const g = c.getContext('2d'); g.drawImage(bmp, 0, 0);
+          const a = (x, y) => g.getImageData(x, y, 1, 1).data[3];
+          return { type: rec.type, w: bmp.width, h: bmp.height, corner: a(2, 2), center: a(bmp.width >> 1, bmp.height >> 1) };
+        }''', sticker_id)
+        check('Sticker = PNG transparent aux coins, opaque au centre', px['type'] == 'image/png' and px['corner'] == 0 and px['center'] == 255, px)
 
         # 4. Ajout manuel + validation
         def add_manual(name, cat, color, status=None, fit=None, style=None):
@@ -200,7 +219,29 @@ try:
         check('Favori : indisponibilité signalée', 'Incomplète' in fav_txt or 'Portable' in fav_txt, fav_txt)
         page.click('.fav'); page.wait_for_selector('.sheet .board')
         shot('08-favori')
+        page.click('[data-preview]'); page.wait_for_selector('.preview-img', timeout=15000)
+        dims = page.evaluate("(() => { const i = document.querySelector('.preview-img'); return [i.naturalWidth, i.naturalHeight]; })()")
+        check('Aperçu de tenue : image 1080×1350 générée', dims == [1080, 1350], dims)
+        check('Aperçu : bouton enregistrer/partager', page.locator('[data-save-img]').count() == 1)
+        shot('08b-apercu')
         close_sheets()
+        # Collage : un vrai sticker est dessiné avec son liseré blanc
+        white = page.evaluate('''async () => {
+          const { db } = await import('/js/db.js');
+          const { renderOutfitImage } = await import('/js/collage.js');
+          const it = window.__drip.state.items.find((i) => i.sticker);
+          const rec = await db.get('photos', it.sticker);
+          const img = await createImageBitmap(new Blob([rec.data], { type: rec.type }));
+          const blob = await renderOutfitImage({ title: 'Test', pieces: [
+            { id: 'a', role: 'top', img, kind: 'sticker' }, { id: 'b', role: 'bottom', img: null, kind: 'color', color: '#2a4d8f' }] });
+          const bmp = await createImageBitmap(blob);
+          const c = document.createElement('canvas'); c.width = bmp.width; c.height = bmp.height;
+          const g = c.getContext('2d'); g.drawImage(bmp, 0, 0);
+          const d = g.getImageData(0, 170, c.width, 600).data; let n = 0;
+          for (let i = 0; i < d.length; i += 4) if (d[i] > 250 && d[i + 1] > 250 && d[i + 2] > 250) n++;
+          return n;
+        }''')
+        check('Collage : sticker dessiné avec liseré blanc', white > 2000, white)
         page.goto(URL + '#/dressing'); page.wait_for_selector('.grid')
         page.click('[data-act="w-status"][data-v="sale"]')
         page.click('[data-act="bulk"]'); page.wait_for_timeout(300)
@@ -219,7 +260,7 @@ try:
             page.click('[data-act="export"]')
         path = SHOTS / 'sauvegarde.json'; dl.value.save_as(str(path))
         data = json.loads(path.read_text())
-        check('Export : pièces, tenues et photos', len(data['items']) == n_items and len(data['outfits']) == n_out and len(data['photos']) == 1)
+        check('Export : pièces, tenues et photos', len(data['items']) == n_items and len(data['outfits']) == n_out and len(data['photos']) == 2 and any(i.get('sticker') for i in data['items']))
         page.click('[data-act="wipe"]'); page.click('.dialog .btn-danger'); page.wait_for_timeout(200); page.click('.dialog .btn-danger'); page.wait_for_timeout(500)
         check('Effacement', len(S()['items']) == 0)
         page.goto(URL + '#/reglages'); page.wait_for_selector('#import-file')
@@ -250,11 +291,12 @@ try:
             check(f'Pas de défilement horizontal ({r_})', w <= 402, w)
         page2.goto(URL + '#/home'); page2.wait_for_timeout(300); shot_p = page2.screenshot(path=str(SHOTS / '09-accueil-final.png'))
 
-        real_errors = [e for e in errors if 'ERR_INTERNET_DISCONNECTED' not in e and 'Failed to fetch' not in e]
+        real_errors = [e for e in errors if 'ERR_INTERNET_DISCONNECTED' not in e and 'Failed to fetch' not in e and 'ERR_FAILED' not in e]
         check('Aucune erreur JavaScript', not real_errors, real_errors[:5])
 
         # 18. Profil féminin (nouveau contexte = nouvel appareil)
         ctx2 = browser.new_context(viewport={'width': 402, 'height': 874}, device_scale_factor=3, is_mobile=True, has_touch=True, locale='fr-FR')
+        ctx2.add_init_script(SPLASH_OFF)
         pf = ctx2.new_page(); pf.on('pageerror', lambda e: errors.append(str(e)))
         pf.goto(URL); pf.wait_for_selector('.welcome')
         pf.click('[data-act="pick-gender"][data-v="f"]'); pf.wait_for_selector('.stats')
@@ -287,6 +329,18 @@ try:
         pf.goto(URL + '#/dressing'); pf.wait_for_selector('.segmented')
         chips = pf.evaluate("[...document.querySelectorAll('[data-act=w-cat]')].map(b => b.textContent)")
         check('Changer de profil ne supprime pas les pièces (robes toujours visibles)', any('Robes' in c for c in chips) and len(S2()['items']) == 4, chips)
+
+        # 19. Animation d'ouverture (contexte sans neutralisation du splash)
+        ctx3 = browser.new_context(viewport={'width': 402, 'height': 874}, device_scale_factor=2, is_mobile=True, has_touch=True, locale='fr-FR')
+        ps = ctx3.new_page(); ps.on('pageerror', lambda e: errors.append(str(e)))
+        ps.goto(URL); ps.wait_for_selector('#splash')
+        ps.wait_for_timeout(1700)
+        ps.screenshot(path=str(SHOTS / '12-splash.png'))
+        check('Animation d\'ouverture affichée', ps.locator('#splash').count() == 1 and ps.locator('.splash-mark').count() == 1)
+        word_visible = ps.evaluate("getComputedStyle(document.querySelector('.splash-word span')).opacity")
+        check('Animation : le nom apparaît', float(word_visible) > 0.9, word_visible)
+        ps.wait_for_selector('#splash', state='detached', timeout=6000)
+        check('Animation : disparaît toute seule', ps.locator('#splash').count() == 0)
         browser.close()
 finally:
     server.terminate()

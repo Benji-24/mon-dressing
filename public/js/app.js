@@ -2,6 +2,8 @@ import { CATEGORIES, GENDERS, categoriesFor, COLORS, FITS, STYLES, SEASONS, STAT
 import { db, uid, savePhoto, photoURL, deletePhotos, exportAll, importAll, storageInfo, requestPersist, getMeta, setMeta } from './db.js';
 import { api, settings, loadImage, resizeTo, blobToBase64, fetchWeather } from './api.js';
 import { generateOutfits, pickNext } from './stylist.js';
+import { makeSticker } from './cutout.js';
+import { renderOutfitImage } from './collage.js';
 
 // ================= Utilitaires =================
 const $ = (s, r = document) => r.querySelector(s);
@@ -393,6 +395,7 @@ function openItem(id) {
       const row = (k, v) => v ? `<div class="row"><span>${k}</span><span>${v}</span></div>` : '';
       return {
         body: `
+          ${it.sticker ? `<div class="sticker-hero" data-photo="${esc(it.sticker)}"></div>` : ''}
           <div class="gallery">${photos.map((p) => p ? `<div data-photo="${esc(p)}"></div>` : `<div><span style="${swatchStyle(it.primaryColor)};width:90px;height:90px;border-radius:50%;display:block;border:1px solid var(--line-2)"></span></div>`).join('')}</div>
           ${photos.length > 1 ? `<p class="hint" style="text-align:center">${photos.length} photos · fais glisser</p>` : ''}
           <h3 class="detail-title">${esc(it.name)}</h3>
@@ -429,7 +432,7 @@ function openItem(id) {
     if (e.target.closest('[data-del]')) {
       const ok = await confirmDialog('Supprimer cette pièce ?', `« ${it.name} » et ses photos seront définitivement supprimés. Les tenues qui l'utilisent l'indiqueront.`, 'Supprimer', true);
       if (!ok) return;
-      await db.del('items', id); await deletePhotos(it.photos || []);
+      await db.del('items', id); await deletePhotos([...(it.photos || []), ...(it.sticker ? [it.sticker] : [])]);
       state.items = state.items.filter((x) => x.id !== id);
       sh.close('force'); toast('Pièce supprimée'); rerender();
     }
@@ -438,7 +441,19 @@ function openItem(id) {
 function refreshOpenSheets() { sheets.forEach((s) => { if (s.kind === 'item' || s.kind === 'outfit') s.refresh(); }); }
 
 // ================= AJOUT / MODIFICATION =================
-const BLANK = () => ({ name: '', category: null, primaryColor: null, secondaryColors: [], brand: '', size: '', fit: null, style: null, seasons: [], status: 'propre', notes: '', photos: [] });
+const BLANK = () => ({ name: '', category: null, primaryColor: null, secondaryColors: [], brand: '', size: '', fit: null, style: null, seasons: [], status: 'propre', notes: '', photos: [], sticker: null });
+
+async function blobOfPhoto(id) {
+  const rec = id ? await db.get('photos', id) : null;
+  return rec ? new Blob([rec.data], { type: rec.type }) : null;
+}
+// Crée un sticker (PNG sans fond) à partir d'une photo déjà enregistrée ; retourne l'id du sticker.
+async function stickerFromPhoto(photoId, onStatus) {
+  const blob = await blobOfPhoto(photoId);
+  if (!blob) throw new Error('Photo introuvable.');
+  const { blob: png, method } = await makeSticker(blob, { onStatus });
+  return { pid: await savePhoto(png), method };
+}
 
 function openItemForm(existing = null, { startWith } = {}) {
   const d = existing ? JSON.parse(JSON.stringify(existing)) : BLANK();
@@ -447,6 +462,8 @@ function openItemForm(existing = null, { startWith } = {}) {
   const ai = { status: 'idle', fields: new Set(), msg: '', remark: '', confidence: null };
   let errors = {};
   let dirty = false;
+  const stk = { status: 'idle', msg: '', method: null };
+  let stkRun = 0;
 
   const chipGroup = (key, list, multi = false) => `<div class="chips wrap" data-group="${key}">${list.map((x) => `<button type="button" class="chip" data-k="${key}" data-v="${x.id}" data-multi="${multi}" aria-pressed="${multi ? d[key].includes(x.id) : d[key] === x.id}">${esc(x.label)}</button>`).join('')}</div>`;
   const swatchGroup = (key, multi) => `<div class="swatches" data-group="${key}">${COLORS.map((c) => `<button type="button" class="swatch-btn" data-k="${key}" data-v="${c.id}" data-multi="${multi}" aria-pressed="${multi ? d[key].includes(c.id) : d[key] === c.id}" aria-label="${c.label}"><span style="${swatchStyle(c.id)}"></span></button>`).join('')}</div><div class="swatch-name" data-name="${key}">${multi ? d[key].map((c) => colorOf(c)?.label).join(', ') || 'Aucune' : colorOf(d[key])?.label || 'Choisis une couleur'}</div>`;
@@ -459,6 +476,13 @@ function openItemForm(existing = null, { startWith } = {}) {
     if (ai.status === 'notclothing') return `<div class="ai-box error">${icon('alert')}<p><b>Aucun vêtement détecté</b><br>Essaie une photo où la pièce est bien visible, à plat ou portée, sur un fond simple.</p></div>`;
     if (ai.status === 'off') return `<div class="ai-box neutral">${icon('info')}<p><b>Reconnaissance IA non connectée.</b> ${esc(ai.msg || 'Remplis les champs à la main, ou connecte l\'IA dans Réglages.')}</p></div>`;
     return '';
+  };
+
+  const stickerBox = () => {
+    if (!d.photos.length) return '';
+    if (stk.status === 'loading') return `<div class="ai-box" style="margin-top:10px"><span class="spinner" style="color:var(--accent)"></span><p><b>Création du sticker…</b><br><span data-stk-msg>${esc(stk.msg || 'Retrait de l\'arrière-plan')}</span></p><button type="button" class="link" data-stk-skip>Passer</button></div>`;
+    if (d.sticker) return `<div class="sticker-row"><div class="sticker-img" data-photo="${esc(d.sticker)}"></div><div><b>Sticker prêt</b><small>Sans fond, utilisé dans l'aperçu des tenues${stk.method === 'simple' ? ' (découpe simple sur fond uni)' : ''}.</small><button type="button" class="btn btn-sm btn-ghost" data-stk-make>Refaire</button></div></div>`;
+    return `<div class="ai-box neutral" style="margin-top:10px">${icon('info')}<p><b>${stk.status === 'fail' ? 'Sticker non créé' : 'Pas de sticker'}</b><br>${esc(stk.msg || 'Sans sticker, la photo sera utilisée dans l\'aperçu des tenues.')}</p></div><button type="button" class="btn btn-sm btn-ghost" style="margin-top:10px" data-stk-make>Créer le sticker</button>`;
   };
 
   const sh = openSheet({
@@ -479,6 +503,7 @@ function openItemForm(existing = null, { startWith } = {}) {
       return {
         body: `
           ${photoSection}
+          ${stickerBox()}
           ${aiBox()}
           <div class="field"><label for="f-name">Nom ${tag('name')}</label><input id="f-name" class="input ${errors.name ? 'invalid' : ''}" data-text="name" value="${esc(d.name)}" placeholder="Ex. Sweat à capuche gris" maxlength="60" autocomplete="off">${errors.name ? `<div class="err-text">${errors.name}</div>` : ''}</div>
           <div class="field"><div class="label">Catégorie ${tag('category')}</div>${chipGroup('category', visibleCategories().map((c) => ({ id: c.id, label: c.label })))}${errors.category ? `<div class="err-text">${errors.category}</div>` : ''}</div>
@@ -493,7 +518,7 @@ function openItemForm(existing = null, { startWith } = {}) {
           </div>
           <div class="field"><div class="label">Disponibilité</div>${chipGroup('status', STATUSES)}</div>
           <div class="field"><label for="f-notes">Notes</label><textarea id="f-notes" class="input" data-text="notes" placeholder="Facultatif : matière, où l'acheter, entretien…" maxlength="500">${esc(d.notes)}</textarea></div>`,
-        foot: `<button type="button" class="btn btn-ghost" data-cancel>Annuler</button><button type="button" class="btn btn-primary" data-save ${ai.status === 'loading' ? 'disabled' : ''}>${icon('check')}Enregistrer</button>`,
+        foot: `<button type="button" class="btn btn-ghost" data-cancel>Annuler</button><button type="button" class="btn btn-primary" data-save ${ai.status === 'loading' || stk.status === 'loading' ? 'disabled' : ''}>${icon('check')}Enregistrer</button>`,
       };
     },
     onClose: async (reason) => {
@@ -519,10 +544,36 @@ function openItemForm(existing = null, { startWith } = {}) {
       } catch (e) { toast(e.message || 'Photo illisible.', { type: 'error' }); }
     }
     keepScroll(() => sh.refresh());
+    if (first && d.photos.length) runSticker();
     if (first && analysisBlob && !existing) {
       if (aiReady()) runAnalysis(analysisBlob);
       else { ai.status = 'off'; ai.msg = aiOffReason(); keepScroll(() => sh.refresh()); }
     }
+  }
+
+  async function runSticker() {
+    if (!d.photos.length) return;
+    const run = ++stkRun;
+    stk.status = 'loading'; stk.msg = '';
+    keepScroll(() => sh.refresh());
+    try {
+      const { pid, method } = await stickerFromPhoto(d.photos[0], (m) => {
+        if (run !== stkRun) return;
+        stk.msg = m; const n = sh.el.querySelector('[data-stk-msg]'); if (n) n.textContent = m;
+      });
+      if (run !== stkRun || sh.closed) { await deletePhotos([pid]); return; }
+      dropSticker();
+      d.sticker = pid; addedPhotos.push(pid); stk.method = method; stk.status = 'done'; dirty = true;
+    } catch (e) {
+      if (run !== stkRun) return;
+      stk.status = 'fail'; stk.msg = e.message;
+    }
+    if (!sh.closed) keepScroll(() => sh.refresh());
+  }
+  function dropSticker() {
+    if (!d.sticker) return;
+    const old = d.sticker; d.sticker = null;
+    if (addedPhotos.includes(old)) { addedPhotos.splice(addedPhotos.indexOf(old), 1); deletePhotos([old]); } else removedPhotos.push(old);
   }
 
   async function runAnalysis(blob) {
@@ -577,8 +628,11 @@ function openItemForm(existing = null, { startWith } = {}) {
     if (rm) {
       const [pid] = d.photos.splice(+rm.dataset.rmPhoto, 1);
       if (addedPhotos.includes(pid)) { addedPhotos.splice(addedPhotos.indexOf(pid), 1); await deletePhotos([pid]); } else removedPhotos.push(pid);
+      if (rm.dataset.rmPhoto === '0') { stkRun++; stk.status = 'idle'; stk.msg = ''; dropSticker(); }
       dirty = true; keepScroll(() => sh.refresh()); return;
     }
+    if (e.target.closest('[data-stk-make]')) { runSticker(); return; }
+    if (e.target.closest('[data-stk-skip]')) { stkRun++; stk.status = 'idle'; keepScroll(() => sh.refresh()); return; }
     if (e.target.closest('[data-analyze]')) { runAnalysis(); return; }
     if (e.target.closest('[data-cancel]')) { sh.close(); return; }
     if (e.target.closest('[data-save]')) {
@@ -597,7 +651,7 @@ function openItemForm(existing = null, { startWith } = {}) {
         id: existing?.id || uid(),
         name: d.name.trim(), category: d.category, primaryColor: d.primaryColor,
         secondaryColors: d.secondaryColors.filter((c) => c !== d.primaryColor), brand: d.brand.trim(), size: d.size.trim(),
-        fit: d.fit, style: d.style, seasons: d.seasons, status: d.status || 'propre', notes: d.notes.trim(), photos: d.photos,
+        fit: d.fit, style: d.style, seasons: d.seasons, status: d.status || 'propre', notes: d.notes.trim(), photos: d.photos, sticker: d.sticker || null,
         wearCount: existing?.wearCount || 0, lastWorn: existing?.lastWorn || null,
         createdAt: existing?.createdAt || now, updatedAt: now,
       };
@@ -719,7 +773,8 @@ function renderResult() {
     </div>
     ${warns.map((w) => `<div class="warn">${icon('info')}<span>${esc(w)}</span></div>`).join('')}
     ${o.variants?.length ? `<div class="section-title" style="margin-top:20px"><h2 style="font-size:17px">Variantes possibles</h2></div><div class="variants">${o.variants.map((v, i) => { const it = itemById(v.itemId); return it ? `<button class="card variant" data-act="st-variant" data-i="${i}">${photoBox(it)}<span>${esc(v.note)}</span>${icon('swap')}</button>` : ''; }).join('')}</div>` : ''}
-    <div class="btn-row" style="margin-top:16px">
+    <button class="btn btn-block" style="margin-top:16px" data-act="st-preview">${icon('image')}Aperçu en stickers</button>
+    <div class="btn-row" style="margin-top:10px">
       <button class="btn" data-act="st-another">${icon('refresh')}Autre</button>
       <button class="btn ${saved ? '' : 'btn-primary'}" data-act="st-save" ${saved ? 'disabled' : ''}>${icon('star')}${saved ? 'Enregistrée' : 'Favori'}</button>
     </div>
@@ -893,6 +948,62 @@ function favResults() {
     : `<div class="empty"><div class="big">${icon('heart')}</div><h3>Aucune tenue favorite</h3><p>Crée une tenue avec le styliste puis appuie sur « Favori » pour la retrouver ici.</p><a class="btn btn-primary" href="#/styliste">${icon('sparkle')}Créer ma tenue</a></div>`}`;
 }
 
+// ----- Aperçu en stickers -----
+async function outfitPieceImages(o) {
+  const s = o.slots || {};
+  const entries = [['top', s.top], ['dress', s.dress], ['layer', s.layer], ['bottom', s.bottom], ['shoes', s.shoes], ['outer', s.outer], ...(s.accessories || []).map((a) => ['accessory', a])];
+  const pieces = [];
+  for (const [role, id] of entries) {
+    const it = id && itemById(id);
+    if (!it) continue;
+    let img = null, kind = 'color';
+    try {
+      const pid = it.sticker || it.photos?.[0];
+      const b = pid ? await blobOfPhoto(pid) : null;
+      if (b) { img = await loadImage(b); kind = it.sticker ? 'sticker' : 'photo'; }
+    } catch { /* on retombe sur la pastille de couleur */ }
+    pieces.push({ id: it.id, role, name: it.name, img, kind, color: colorOf(it.primaryColor)?.hex });
+  }
+  return pieces;
+}
+
+function openOutfitPreview(o) {
+  const st = { url: null, blob: null, err: null, noSticker: [] };
+  const sh = openSheet({
+    title: 'Aperçu de la tenue',
+    full: true,
+    render: () => {
+      let body;
+      if (st.err) body = `<div class="warn bad">${icon('alert')}<span>${esc(st.err)}</span></div>`;
+      else if (!st.url) body = `<div class="empty"><span class="spinner" style="color:var(--accent)"></span><p>Composition de l'image…</p></div>`;
+      else body = `<img class="preview-img" src="${st.url}" alt="Aperçu de la tenue : ${esc(o.title)}">
+        ${st.noSticker.length ? `<p class="hint">${plural(st.noSticker.length, 'pièce n\'a pas', 'pièces n\'ont pas')} de sticker (${st.noSticker.map(esc).join(', ')}) : leur photo est utilisée à la place. Ouvre la pièce › Modifier › « Créer le sticker ».</p>` : ''}`;
+      return { body, foot: st.url ? `<button type="button" class="btn btn-primary" data-save-img>${icon('download')}Enregistrer / partager</button>` : '' };
+    },
+    onClose: () => { if (st.url) URL.revokeObjectURL(st.url); },
+  });
+  (async () => {
+    try {
+      const pieces = await outfitPieceImages(o);
+      if (!pieces.length) throw new Error('Aucune pièce de cette tenue n\'existe plus dans ton dressing.');
+      st.noSticker = pieces.filter((p) => p.kind !== 'sticker').map((p) => p.name);
+      st.blob = await renderOutfitImage({ title: o.title, pieces, accent: gender() === 'f' ? '#FF8FC7' : '#C8F135' });
+      st.url = URL.createObjectURL(st.blob);
+    } catch (e) { st.err = e.message || 'Impossible de créer l\'aperçu.'; }
+    if (!sh.closed) sh.refresh();
+  })();
+  sh.el.addEventListener('click', async (e) => {
+    if (!e.target.closest('[data-save-img]') || !st.blob) return;
+    const name = `tenue-${(o.title || 'mon-dressing').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'mon-dressing'}.png`;
+    const file = new File([st.blob], name, { type: 'image/png' });
+    try {
+      if (navigator.canShare?.({ files: [file] })) { await navigator.share({ files: [file], title: o.title }); return; }
+    } catch (err) { if (err?.name === 'AbortError') return; }
+    const a = document.createElement('a'); a.href = st.url; a.download = name; document.body.append(a); a.click(); a.remove();
+    toast('Image enregistrée');
+  });
+}
+
 function openOutfit(id) {
   const sh = openSheet({
     title: 'Tenue',
@@ -907,6 +1018,7 @@ function openOutfit(id) {
         body: `<h3 class="detail-title" style="margin-top:4px">${esc(o.title)}</h3>
           <p class="muted small" style="margin:0">${o.source === 'ai' ? 'Composée par l\'IA' : 'Composée par l\'algorithme local'} · ${fmtDate(o.createdAt)}${o.wornCount ? ` · portée ${plural(o.wornCount, 'fois', 'fois')}` : ''}</p>
           <div style="margin-top:14px">${status}</div>
+          <button class="btn btn-block" style="margin-top:14px" data-preview>${icon('image')}Voir l'aperçu en stickers</button>
           ${outfitBoard(o, false)}
           <div class="card score"><div class="score-top"><span class="muted small" style="font-weight:700">Cohérence</span><b>${o.rating}<span class="dim" style="font-size:14px">/10</span></b></div><div class="bar"><i style="width:${o.rating * 10}%"></i></div><p>${esc(o.explanation)}</p>${o.coherence ? `<p><b style="color:var(--text)">${esc(o.coherence)}</b></p>` : ''}</div>`,
         foot: `<button class="btn btn-danger" data-del style="flex:0 0 56px" aria-label="Supprimer">${icon('trash')}</button>${o.favorite ? '' : '<button class="btn" data-fav>★ Favori</button>'}<button class="btn btn-primary" data-wear ${a.ok ? '' : 'disabled'}>${icon('hand')}Je la porte</button>`,
@@ -917,6 +1029,7 @@ function openOutfit(id) {
   sh.el.addEventListener('click', async (e) => {
     const o = state.outfits.find((x) => x.id === id);
     if (!o) return;
+    if (e.target.closest('[data-preview]')) { openOutfitPreview(o); return; }
     if (e.target.closest('[data-wear]')) {
       await wearOutfit(o);
       const upd = { ...o, wornAt: new Date().toISOString(), wornCount: (o.wornCount || 0) + 1 };
@@ -930,6 +1043,26 @@ function openOutfit(id) {
       sh.close('force'); toast('Tenue supprimée'); rerender();
     }
   });
+}
+
+let stickerBatchRunning = false;
+async function makeMissingStickers() {
+  if (stickerBatchRunning) return;
+  const todo = state.items.filter((i) => i.photos?.length && !i.sticker);
+  if (!todo.length) { toast('Toutes les pièces ont déjà un sticker.'); return; }
+  stickerBatchRunning = true;
+  let ok = 0, fail = 0, lastErr = '';
+  for (let n = 0; n < todo.length; n++) {
+    toast(`Sticker ${n + 1} / ${todo.length}…`, { timeout: 60000 });
+    try {
+      const { pid } = await stickerFromPhoto(todo[n].photos[0]);
+      const upd = { ...todo[n], sticker: pid, updatedAt: new Date().toISOString() };
+      await db.put('items', upd); state.items[state.items.findIndex((x) => x.id === upd.id)] = upd; ok++;
+    } catch (e) { fail++; lastErr = e.message; }
+  }
+  stickerBatchRunning = false;
+  toast(`${plural(ok, 'sticker créé', 'stickers créés')}${fail ? ` · ${plural(fail, 'échec', 'échecs')} (${lastErr})` : ''}`, { type: fail ? 'error' : 'ok', timeout: 5000 });
+  rerender();
 }
 
 // ================= RÉGLAGES =================
@@ -959,6 +1092,13 @@ function viewSettings() {
       <input id="pw" class="input" type="password" autocomplete="current-password" value="${esc(settings.password)}" placeholder="Celui défini lors de l'installation">
       <p class="hint">Il empêche les inconnus d'utiliser ton quota d'IA. La clé Gemini, elle, ne quitte jamais le serveur.</p></div>
     <button class="btn btn-primary btn-block" data-act="save-password">${icon('check')}Enregistrer et tester</button>
+  </div>
+
+  <div class="section-title"><h2>Stickers</h2></div>
+  <div class="card set-group" style="padding:16px">
+    <p style="margin:0 0 12px">Chaque pièce peut avoir un <b style="color:var(--text)">sticker</b> (photo sans fond) pour l'aperçu des tenues. ${state.items.filter((i) => i.photos?.length && !i.sticker).length ? `<b style="color:var(--text)">${plural(state.items.filter((i) => i.photos?.length && !i.sticker).length, 'pièce n\'a pas', 'pièces n\'ont pas')}</b> encore de sticker.` : 'Toutes tes pièces avec photo ont un sticker.'}</p>
+    <button class="btn btn-block" data-act="make-stickers" ${state.items.some((i) => i.photos?.length && !i.sticker) ? '' : 'disabled'}>${icon('image')}Créer les stickers manquants</button>
+    <p class="hint">Détourage fait sur ton téléphone. Le premier téléchargement du modèle prend un moment, ensuite c'est plus rapide.</p>
   </div>
 
   <div class="section-title"><h2>Sauvegarde</h2></div>
@@ -1025,6 +1165,8 @@ const actions = {
   'goto-dressing': (el) => { state.w.status = el.dataset.status || 'all'; state.w.cat = 'all'; go('dressing'); },
   'open-item': (el) => openItem(el.dataset.id),
   'open-outfit': (el) => openOutfit(el.dataset.id),
+  'st-preview': () => { const o = state.st.result?.outfit; if (o) openOutfitPreview(o); },
+  'make-stickers': () => makeMissingStickers(),
   'cycle-status': async (el) => {
     const it = itemById(el.dataset.id); if (!it) return;
     const order = STATUSES.map((s) => s.id);
