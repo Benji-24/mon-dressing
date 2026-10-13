@@ -3,7 +3,10 @@
 // - Relaie les demandes d'IA vers Google Gemini : la clé API reste ICI, jamais dans le navigateur.
 import { CATEGORIES, GENDERS, COLORS, FITS, STYLES, SEASONS, STATUSES, OCCASIONS, ids } from '../public/js/catalog.js';
 
-const DEFAULT_MODELS = ['gemini-flash-latest', 'gemini-2.5-flash', 'gemini-flash-lite-latest'];
+// Chaque modèle a son propre quota gratuit : quand l'un est épuisé, on passe au suivant.
+// Reconnaître un vêtement est simple : les modèles « lite » (quota gratuit plus large) passent en premier.
+const MODELS_ANALYZE = ['gemini-2.5-flash-lite', 'gemini-flash-lite-latest', 'gemini-2.5-flash', 'gemini-flash-latest'];
+const MODELS_STYLE = ['gemini-flash-latest', 'gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-flash-lite-latest'];
 const MAX_IMAGE_B64 = 7_000_000; // ~5 Mo
 const MAX_ITEMS = 400;
 
@@ -72,9 +75,10 @@ async function discoverModels(env, exclude) {
   } catch { return []; }
 }
 
-export async function callGemini(env, parts, schema, { temperature = 0.4 } = {}) {
-  const configured = (env.GEMINI_MODEL ? String(env.GEMINI_MODEL).split(',') : DEFAULT_MODELS).map((m) => m.trim()).filter(Boolean);
+export async function callGemini(env, parts, schema, { temperature = 0.4, models: preferred = MODELS_STYLE } = {}) {
+  const configured = (env.GEMINI_MODEL ? String(env.GEMINI_MODEL).split(',') : preferred).map((m) => m.trim()).filter(Boolean);
   const t0 = Date.now();
+  let limited = 0, daily = false;
   const log = []; // ex. « gemini-flash-latest : 503 (overloaded) » — affiché pour comprendre une panne
   const body = JSON.stringify({ contents: [{ role: 'user', parts }], generationConfig: { temperature, responseMimeType: 'application/json', responseSchema: schema } });
 
@@ -92,7 +96,12 @@ export async function callGemini(env, parts, schema, { temperature = 0.4 } = {})
       let res = await post(model);
       if ([0, 500, 502, 503, 504].includes(res.status)) { await sleep(1200); res = await post(model); } // surcharge passagère : un 2e essai
       if (res.status === 404) { log.push(`${model} : introuvable`); continue; }
-      if (res.status === 429) throw new GeminiError('Limite gratuite de l\'IA atteinte pour le moment. Réessaie dans une minute (ou demain si le quota du jour est épuisé).', 429, 'rate-limit');
+      if (res.status === 429) {
+        let t = ''; try { t = await res.text(); } catch { /* ignore */ }
+        if (/PerDay/i.test(t)) daily = true;
+        log.push(`${model} : quota gratuit atteint`); limited++;
+        continue; // chaque modèle a son quota : on essaie le suivant
+      }
       if (res.status === 400 || res.status === 403) {
         const t = await res.text();
         if (/API key|API_KEY|permission/i.test(t)) throw new GeminiError('Clé Gemini refusée par Google. Vérifie la clé enregistrée sur le serveur.', 502, 'bad-key');
@@ -120,6 +129,11 @@ export async function callGemini(env, parts, schema, { temperature = 0.4 } = {})
   if (!env.GEMINI_MODEL) {
     const extra = await discoverModels(env, configured);
     if (extra.length) { const second = await run(extra); if (second) return second; }
+  }
+  if (limited > 0 && log.every((l) => /quota|introuvable/.test(l))) {
+    throw new GeminiError(daily
+      ? 'Quota gratuit du jour épuisé chez Google pour tous les modèles. Il se renouvelle chaque jour vers 9 h (heure de Paris). En attendant, remplis les champs à la main : les stickers et le styliste local marchent sans IA.'
+      : 'Limite gratuite de l\'IA atteinte pour le moment. Réessaie dans une minute.', 429, 'rate-limit');
   }
   throw new GeminiError(`Service Gemini indisponible pour le moment. Détail : ${log.slice(-4).join(' ; ') || 'aucune réponse'}.`, 502, 'gemini-down');
 }
@@ -170,7 +184,7 @@ Règles strictes :
 - "name" en français, 2 à 5 mots, sans marque inventée.`;
 
   try {
-    const { result, model } = await callGemini(env, [{ text: prompt }, { inlineData: { mimeType, data: image } }], analyzeSchema(gender), { temperature: 0.2 });
+    const { result, model } = await callGemini(env, [{ text: prompt }, { inlineData: { mimeType, data: image } }], analyzeSchema(gender), { temperature: 0.2, models: MODELS_ANALYZE });
     return json({ suggestion: sanitizeAnalysis(result), model });
   } catch (e) { return geminiFail(e); }
 }

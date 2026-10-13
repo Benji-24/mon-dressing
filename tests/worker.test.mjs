@@ -170,3 +170,18 @@ test('panne Google persistante : le message donne le détail', async () => {
   const j = await res.json();
   assert.match(j.error, /503/); assert.match(j.error, /overloaded/);
 });
+
+test('quota épuisé sur un modèle : on essaie le suivant', async () => {
+  const used = [];
+  mockGemini((url) => { used.push(String(url)); return used.length === 1 ? new Response('{"error":{"message":"quota"}}', { status: 429 }) : okBody(); });
+  const res = await worker.fetch(post('/api/analyze', { image: 'QUJD' }), ENV);
+  assert.equal(res.status, 200); assert.equal(used.length, 2);
+  assert.ok(used[0].includes('flash-lite'), 'la reconnaissance commence par un modèle lite (quota plus large)');
+});
+
+test('quota du jour épuisé partout : message clair avec l\'heure de renouvellement', async () => {
+  mockGemini(() => new Response('{"error":{"message":"Quota exceeded ... GenerateRequestsPerDayPerProjectPerModel"}}', { status: 429 }));
+  const res = await worker.fetch(post('/api/analyze', { image: 'QUJD' }), ENV);
+  assert.equal(res.status, 429);
+  assert.match((await res.json()).error, /du jour.*9 h/);
+});
