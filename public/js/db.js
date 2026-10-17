@@ -97,9 +97,11 @@ function b64ToBuf(b64) {
 }
 
 export async function exportAll() {
-  const [items, outfits, photos, profile] = await Promise.all([db.all('items'), db.all('outfits'), db.all('photos'), getMeta('profile')]);
+  const [items, outfits, photos, profile, me, history] = await Promise.all([db.all('items'), db.all('outfits'), db.all('photos'), getMeta('profile'), getMeta('me'), getMeta('history')]);
   const payload = {
     profile,
+    me: me || null,
+    history: history || [],
     app: 'DRIP',
     format: 1,
     exportedAt: new Date().toISOString(),
@@ -123,6 +125,12 @@ export async function importAll(text, mode = 'merge') {
   await db.putMany('items', data.items);
   await db.putMany('outfits', data.outfits || []);
   if (data.profile && (mode === 'replace' || !(await getMeta('profile')))) await setMeta('profile', data.profile);
+  if (data.me && (mode === 'replace' || !(await getMeta('me')))) await setMeta('me', data.me);
+  if (Array.isArray(data.history) && data.history.length) {
+    const have = mode === 'replace' ? [] : (await getMeta('history')) || [];
+    const seen = new Set(have.map((h) => h.at));
+    await setMeta('history', [...have, ...data.history.filter((h) => !seen.has(h.at))].sort((a, b) => a.at.localeCompare(b.at)).slice(-400));
+  }
   return { items: data.items.length, outfits: (data.outfits || []).length, photos: photos.length };
 }
 

@@ -4,6 +4,8 @@ import { api, settings, loadImage, resizeTo, blobToBase64, fetchWeather } from '
 import { generateOutfits, pickNext } from './stylist.js';
 import { makeSticker } from './cutout.js';
 import { renderOutfitImage } from './collage.js';
+import { renderAvatar, SKIN_TONES, skinHex } from './avatar.js';
+import { addHistory, filterHistory, summary, chartSVG, fmtRating } from './progress.js';
 
 // ================= Utilitaires =================
 const $ = (s, r = document) => r.querySelector(s);
@@ -23,6 +25,7 @@ const P = {
   search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>',
   x: '<path d="M18 6 6 18M6 6l12 12"/>',
   camera: '<path d="M4 8h3l2-3h6l2 3h3a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V9a1 1 0 0 1 1-1z"/><circle cx="12" cy="13.5" r="3.5"/>',
+  user: '<circle cx="12" cy="8" r="4"/><path d="M4 21c0-4.4 3.6-8 8-8s8 3.6 8 8"/>',
   image: '<rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="2"/><path d="m21 16-5-5-9 9"/>',
   sliders: '<path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12"/><circle cx="16" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="18" r="2"/>',
   settings: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>',
@@ -55,6 +58,10 @@ const statusColor = (s) => `var(--st-${s})`;
 // ================= État =================
 const state = {
   profile: null,
+  me: null,
+  history: [],
+  pf: 'ai',
+  pfTable: false,
   items: [],
   outfits: [],
   health: null, // réponse /api/health ou {error}
@@ -77,6 +84,8 @@ async function loadData() {
   state.outfits = outfits;
   state.lastExport = await getMeta('lastExport');
   state.profile = await getMeta('profile');
+  state.me = await getMeta('me');
+  state.history = (await getMeta('history')) || [];
   applyProfile();
 }
 
@@ -168,7 +177,7 @@ function photoBox(item, cls = 'photo', extra = '') {
 }
 
 // ================= Navigation =================
-const ROUTES = ['home', 'dressing', 'styliste', 'favoris', 'reglages'];
+const ROUTES = ['home', 'dressing', 'styliste', 'favoris', 'reglages', 'profil'];
 const route = () => { const r = (location.hash || '#/home').replace('#/', '').split('?')[0]; return ROUTES.includes(r) ? r : 'home'; };
 const go = (r) => { if (route() === r) render(); else location.hash = `#/${r}`; };
 
@@ -186,12 +195,13 @@ function render(animate = false) {
     return;
   }
   $('#tabbar').hidden = false;
-  const html = { home: viewHome, dressing: viewDressing, styliste: viewStylist, favoris: viewFavorites, reglages: viewSettings }[r]();
+  const html = { home: viewHome, dressing: viewDressing, styliste: viewStylist, favoris: viewFavorites, reglages: viewSettings, profil: viewMe }[r]();
   view.innerHTML = html;
   view.style.animation = 'none';
   if (animate) { void view.offsetWidth; view.style.animation = ''; }
   renderTabbar();
   hydratePhotos(view);
+  if (r === 'profil') refreshMeAvatar();
 }
 const rerender = () => { const y = window.scrollY; render(); window.scrollTo(0, y); };
 
@@ -246,7 +256,7 @@ function viewHome() {
   return `
   <header class="topbar">
     ${LOGO}
-    <a class="icon-btn" href="#/reglages" aria-label="Réglages">${icon('settings')}</a>
+    <span style="display:flex;gap:8px"><a class="icon-btn" href="#/profil" aria-label="Mon profil">${icon('user')}</a><a class="icon-btn" href="#/reglages" aria-label="Réglages">${icon('settings')}</a></span>
   </header>
   <p class="eyebrow" style="margin:14px 0 0">${hello} · ${new Date().toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long' })}</p>
   <section class="stats">
@@ -691,7 +701,21 @@ function stylistRequest() {
     temp: s.tempMode === 'live' && s.weather ? s.weather.temp : s.temp,
     formality: s.formality, preferColors: s.preferColors, avoidColors: s.avoidColors.filter((c) => !s.preferColors.includes(c)),
     mustItems: s.mustItems.filter((id) => itemById(id)), shoesId: s.shoesId && itemById(s.shoesId) ? s.shoesId : null,
+    prefStyles: state.me?.prefStyles || [],
   };
+}
+
+// Ce qui part vers l'IA : style préféré et, si tu l'autorises, taille et poids. Jamais la photo du visage.
+function aiProfile() {
+  const me = state.me || {};
+  const share = me.share !== false;
+  return { gender: gender(), prefStyles: me.prefStyles || [], styleNote: me.styleNote || '', ...(share && me.height ? { heightCm: me.height } : {}), ...(share && me.weight ? { weightKg: me.weight } : {}) };
+}
+
+async function logGen(outfit, source) {
+  if (!outfit) return;
+  state.history = addHistory(state.history, { source, rating: outfit.rating, title: outfit.title });
+  try { await setMeta('history', state.history); } catch { /* l'historique est secondaire */ }
 }
 
 function viewStylist() {
@@ -775,7 +799,7 @@ function renderResult() {
     </div>
     ${warns.map((w) => `<div class="warn">${icon('info')}<span>${esc(w)}</span></div>`).join('')}
     ${o.variants?.length ? `<div class="section-title" style="margin-top:20px"><h2 style="font-size:17px">Variantes possibles</h2></div><div class="variants">${o.variants.map((v, i) => { const it = itemById(v.itemId); return it ? `<button class="card variant" data-act="st-variant" data-i="${i}">${photoBox(it)}<span>${esc(v.note)}</span>${icon('swap')}</button>` : ''; }).join('')}</div>` : ''}
-    <button class="btn btn-block" style="margin-top:16px" data-act="st-preview">${icon('image')}Aperçu en stickers</button>
+    <button class="btn btn-block" style="margin-top:16px" data-act="st-preview">${icon('image')}Aperçu : stickers &amp; avatar</button>
     <div class="btn-row" style="margin-top:10px">
       <button class="btn" data-act="st-another">${icon('refresh')}Autre</button>
       <button class="btn ${saved ? '' : 'btn-primary'}" data-act="st-save" ${saved ? 'disabled' : ''}>${icon('star')}${saved ? 'Enregistrée' : 'Favori'}</button>
@@ -810,6 +834,7 @@ async function generate({ another = false } = {}) {
       const next = pickNext(remaining, s.shownKeys);
       s.shownKeys.push(next.key);
       s.result = { ...s.result, outfit: next };
+      logGen(next, s.result.source);
       updateResult(); return;
     }
   }
@@ -823,7 +848,7 @@ async function generate({ another = false } = {}) {
     try {
       const items = state.items.map(({ id, name, category, primaryColor, secondaryColors, fit, style, seasons, status }) => ({ id, name, category, primaryColor, secondaryColors, fit, style, seasons, status }));
       const weather = s.tempMode === 'live' && s.weather ? { source: 'live', ...s.weather } : null;
-      const res = await api.style({ request: req, items, weather, excludeKeys: s.shownKeys });
+      const res = await api.style({ request: req, items, weather, excludeKeys: s.shownKeys, profile: aiProfile() });
       const all = (res.outfits || []).filter(validateClientOutfit);
       const pool = all.filter((o) => !s.shownKeys.includes(o.key));
       if (another && all.length && !pool.length) {
@@ -831,7 +856,7 @@ async function generate({ another = false } = {}) {
         const local = runLocal(req);
         if (local.outfit && s.shownKeys.filter((k) => k === local.outfit.key).length === 1) {
           local.warnings = ['L\'IA n\'a pas trouvé d\'autre combinaison avec tes pièces disponibles : voici une alternative de l\'algorithme local.', ...local.warnings];
-          s.result = local; s.loading = false; updateResult(true); return;
+          s.result = local; s.loading = false; logGen(local.outfit, 'local'); updateResult(true); return;
         }
         throw new Error('Aucune autre combinaison possible avec tes pièces disponibles.');
       }
@@ -854,6 +879,7 @@ async function generate({ another = false } = {}) {
     s.shownKeys.push(precheck.outfit.key);
     s.result = precheck;
   }
+  logGen(s.result?.outfit, s.result?.source === 'ai' ? 'ai' : 'local');
   updateResult(true);
 }
 
@@ -964,44 +990,63 @@ async function outfitPieceImages(o) {
       const b = pid ? await blobOfPhoto(pid) : null;
       if (b) { img = await loadImage(b); kind = it.sticker ? 'sticker' : 'photo'; }
     } catch { /* on retombe sur la pastille de couleur */ }
-    pieces.push({ id: it.id, role, name: it.name, img, kind, color: colorOf(it.primaryColor)?.hex });
+    pieces.push({ id: it.id, role, name: it.name, category: it.category, img, kind, color: colorOf(it.primaryColor)?.hex });
   }
   return pieces;
 }
 
-function openOutfitPreview(o) {
-  const st = { url: null, blob: null, err: null, noSticker: [] };
+function openOutfitPreview(o, startView = 'stickers') {
+  const st = { view: startView, urls: {}, blobs: {}, err: null, noSticker: [], pieces: null };
+  const accent = () => (gender() === 'f' ? '#FF8FC7' : '#C8F135');
   const sh = openSheet({
     title: 'Aperçu de la tenue',
     full: true,
     render: () => {
+      const tabs = `<div class="segmented" role="group" aria-label="Type d'aperçu"><button data-pv="stickers" aria-pressed="${st.view === 'stickers'}">Stickers</button><button data-pv="avatar" aria-pressed="${st.view === 'avatar'}">Sur mon avatar</button></div>`;
+      const url = st.urls[st.view];
       let body;
-      if (st.err) body = `<div class="warn bad">${icon('alert')}<span>${esc(st.err)}</span></div>`;
-      else if (!st.url) body = `<div class="empty"><span class="spinner" style="color:var(--accent)"></span><p>Composition de l'image…</p></div>`;
-      else body = `<img class="preview-img" src="${st.url}" alt="Aperçu de la tenue : ${esc(o.title)}">
-        ${st.noSticker.length ? `<p class="hint">${plural(st.noSticker.length, 'pièce n\'a pas', 'pièces n\'ont pas')} de sticker (${st.noSticker.map(esc).join(', ')}) : leur photo est utilisée à la place. Ouvre la pièce › Modifier › « Créer le sticker ».</p>` : ''}`;
-      return { body, foot: st.url ? `<button type="button" class="btn btn-primary" data-save-img>${icon('download')}Enregistrer / partager</button>` : '' };
+      if (st.err) body = `<div class="warn bad" style="margin-top:12px">${icon('alert')}<span>${esc(st.err)}</span></div>`;
+      else if (!url) body = `<div class="empty"><span class="spinner" style="color:var(--accent)"></span><p>Composition de l'image…</p></div>`;
+      else {
+        const hasBody = !!(state.me && (state.me.height || state.me.face));
+        const hint = st.view === 'avatar'
+          ? `${hasBody ? '' : `<p class="hint">Cet avatar utilise des proportions moyennes. Renseigne ta taille, ton poids et ta photo dans <a href="#/profil" data-go-profil style="color:var(--accent)">Mon profil</a> pour qu'il te ressemble.</p>`}${st.noSticker.length ? `<p class="hint">${plural(st.noSticker.length, 'pièce n\'a pas', 'pièces n\'ont pas')} de sticker (${st.noSticker.map(esc).join(', ')}) : une forme de la bonne couleur la remplace.</p>` : ''}`
+          : (st.noSticker.length ? `<p class="hint">${plural(st.noSticker.length, 'pièce n\'a pas', 'pièces n\'ont pas')} de sticker (${st.noSticker.map(esc).join(', ')}) : leur photo est utilisée à la place. Ouvre la pièce › Modifier › « Créer le sticker ».</p>` : '');
+        body = `<img class="preview-img" style="margin-top:12px" src="${url}" alt="Aperçu de la tenue : ${esc(o.title)}">${hint}`;
+      }
+      return { body: tabs + body, foot: url ? `<button type="button" class="btn btn-primary" data-save-img>${icon('download')}Enregistrer / partager</button>` : '' };
     },
-    onClose: () => { if (st.url) URL.revokeObjectURL(st.url); },
+    onClose: () => { Object.values(st.urls).forEach((u) => URL.revokeObjectURL(u)); },
   });
-  (async () => {
+  async function build(view) {
+    if (st.urls[view]) { if (!sh.closed) sh.refresh(); return; }
     try {
-      const pieces = await outfitPieceImages(o);
-      if (!pieces.length) throw new Error('Aucune pièce de cette tenue n\'existe plus dans ton dressing.');
-      st.noSticker = pieces.filter((p) => p.kind !== 'sticker').map((p) => p.name);
-      st.blob = await renderOutfitImage({ title: o.title, pieces, accent: gender() === 'f' ? '#FF8FC7' : '#C8F135' });
-      st.url = URL.createObjectURL(st.blob);
+      st.pieces ||= await outfitPieceImages(o);
+      if (!st.pieces.length) throw new Error('Aucune pièce de cette tenue n\'existe plus dans ton dressing.');
+      st.noSticker = st.pieces.filter((p) => p.kind !== 'sticker').map((p) => p.name);
+      let blob;
+      if (view === 'avatar') {
+        let face = null;
+        try { const fb = state.me?.face ? await blobOfPhoto(state.me.face) : null; if (fb) face = await loadImage(fb); } catch { /* sans visage */ }
+        blob = await renderAvatar({ me: state.me || {}, face, pieces: st.pieces, title: o.title, accent: accent() });
+      } else blob = await renderOutfitImage({ title: o.title, pieces: st.pieces, accent: accent() });
+      st.blobs[view] = blob; st.urls[view] = URL.createObjectURL(blob);
     } catch (e) { st.err = e.message || 'Impossible de créer l\'aperçu.'; }
     if (!sh.closed) sh.refresh();
-  })();
+  }
+  build(st.view);
   sh.el.addEventListener('click', async (e) => {
-    if (!e.target.closest('[data-save-img]') || !st.blob) return;
-    const name = `tenue-${(o.title || 'mon-dressing').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'mon-dressing'}.png`;
-    const file = new File([st.blob], name, { type: 'image/png' });
+    const pv = e.target.closest('[data-pv]');
+    if (pv) { st.view = pv.dataset.pv; st.err = null; sh.refresh(); build(st.view); return; }
+    if (e.target.closest('[data-go-profil]')) { e.preventDefault(); sh.close('force'); location.hash = '#/profil'; return; }
+    const blob = st.blobs[st.view];
+    if (!e.target.closest('[data-save-img]') || !blob) return;
+    const name = `${st.view === 'avatar' ? 'avatar' : 'tenue'}-${(o.title || 'mon-dressing').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'mon-dressing'}.png`;
+    const file = new File([blob], name, { type: 'image/png' });
     try {
       if (navigator.canShare?.({ files: [file] })) { await navigator.share({ files: [file], title: o.title }); return; }
     } catch (err) { if (err?.name === 'AbortError') return; }
-    const a = document.createElement('a'); a.href = st.url; a.download = name; document.body.append(a); a.click(); a.remove();
+    const a = document.createElement('a'); a.href = st.urls[st.view]; a.download = name; document.body.append(a); a.click(); a.remove();
     toast('Image enregistrée');
   });
 }
@@ -1020,7 +1065,7 @@ function openOutfit(id) {
         body: `<h3 class="detail-title" style="margin-top:4px">${esc(o.title)}</h3>
           <p class="muted small" style="margin:0">${o.source === 'ai' ? 'Composée par l\'IA' : 'Composée par l\'algorithme local'} · ${fmtDate(o.createdAt)}${o.wornCount ? ` · portée ${plural(o.wornCount, 'fois', 'fois')}` : ''}</p>
           <div style="margin-top:14px">${status}</div>
-          <button class="btn btn-block" style="margin-top:14px" data-preview>${icon('image')}Voir l'aperçu en stickers</button>
+          <button class="btn btn-block" style="margin-top:14px" data-preview>${icon('image')}Aperçu : stickers &amp; avatar</button>
           ${outfitBoard(o, false)}
           <div class="card score"><div class="score-top"><span class="muted small" style="font-weight:700">Cohérence</span><b>${o.rating}<span class="dim" style="font-size:14px">/10</span></b></div><div class="bar"><i style="width:${o.rating * 10}%"></i></div><p>${esc(o.explanation)}</p>${o.coherence ? `<p><b style="color:var(--text)">${esc(o.coherence)}</b></p>` : ''}</div>`,
         foot: `<button class="btn btn-danger" data-del style="flex:0 0 56px" aria-label="Supprimer">${icon('trash')}</button>${o.favorite ? '' : '<button class="btn" data-fav>★ Favori</button>'}<button class="btn btn-primary" data-wear ${a.ok ? '' : 'disabled'}>${icon('hand')}Je la porte</button>`,
@@ -1067,6 +1112,81 @@ async function makeMissingStickers() {
   rerender();
 }
 
+// ================= MON PROFIL =================
+const meVal = () => state.me || {};
+async function saveMe(patch) {
+  state.me = { ...(state.me || {}), ...patch };
+  await setMeta('me', state.me);
+}
+let meAvatarRun = 0;
+async function refreshMeAvatar() {
+  const run = ++meAvatarRun;
+  const img = $('#me-avatar-img'); if (!img) return;
+  try {
+    const me = meVal();
+    let face = null;
+    try { const fb = me.face ? await blobOfPhoto(me.face) : null; if (fb) face = await loadImage(fb); } catch { /* sans visage */ }
+    const blob = await renderAvatar({ me, face, pieces: [], title: 'Mon avatar', accent: gender() === 'f' ? '#FF8FC7' : '#C8F135' });
+    if (run !== meAvatarRun || !$('#me-avatar-img')) return;
+    const old = img.dataset.url; if (old) URL.revokeObjectURL(old);
+    const url = URL.createObjectURL(blob); img.dataset.url = url; img.src = url; img.hidden = false;
+    $('#me-avatar-wait')?.remove();
+  } catch { /* l'aperçu est facultatif */ }
+}
+
+function viewMe() {
+  const me = meVal();
+  const hist = filterHistory(state.history, state.pf);
+  const sm = summary(hist);
+  const trend = sm.trend == null ? '' : sm.trend > 0.25 ? `<span class="up">▲ +${fmtRating(sm.trend)}</span>` : sm.trend < -0.25 ? `<span class="down">▼ ${fmtRating(sm.trend)}</span>` : '<span>≈ stable</span>';
+  const pfBtn = (id, l) => `<button data-act="me-pf" data-v="${id}" aria-pressed="${state.pf === id}">${l}</button>`;
+  const rows = [...hist].reverse().slice(0, 15).map((h) => `<tr><td>${fmtDate(h.at)}</td><td>${esc(h.title)}</td><td>${h.source === 'ai' ? 'IA' : 'Local'}</td><td><b>${h.rating}</b>/10</td></tr>`).join('');
+  return `
+  <header class="topbar"><a class="icon-btn" href="#/home" aria-label="Retour">${icon('left')}</a><h1 style="font-size:22px">Mon profil</h1><span style="width:44px"></span></header>
+
+  <div class="card me-avatar"><div id="me-avatar-wait"><span class="spinner" style="color:var(--accent)"></span></div><img id="me-avatar-img" alt="Mon avatar" hidden></div>
+  <p class="hint" style="text-align:center">Avatar stylisé calculé sur ton téléphone d'après tes mesures. Ce n'est pas une photo réaliste.</p>
+
+  <div class="section-title"><h2>Mon corps</h2></div>
+  <div class="card set-group" style="padding:16px">
+    <div class="two-col">
+      <div class="field"><label class="label" for="me-height">Taille (cm)</label><input id="me-height" class="input" type="number" inputmode="numeric" min="120" max="215" placeholder="Ex. 178" value="${esc(me.height ?? '')}"></div>
+      <div class="field"><label class="label" for="me-weight">Poids (kg)</label><input id="me-weight" class="input" type="number" inputmode="decimal" min="30" max="250" placeholder="Facultatif" value="${esc(me.weight ?? '')}"></div>
+    </div>
+    <div class="field"><div class="label">Teint de l'avatar</div>
+      <div class="swatches">${SKIN_TONES.map((t) => `<button class="swatch-btn" data-act="me-skin" data-v="${t.id}" aria-pressed="${(me.skin || 'moyen') === t.id}" aria-label="${t.label}"><span style="background:${t.hex}"></span></button>`).join('')}</div></div>
+    <div class="field"><div class="label">Ma photo de visage</div>
+      <div class="btn-row">
+        <label class="btn" style="cursor:pointer">${icon('camera')}Prendre<input type="file" accept="image/*" capture="user" class="sr" data-me-face></label>
+        <label class="btn" style="cursor:pointer">${icon('image')}Galerie<input type="file" accept="image/*" class="sr" data-me-face></label>
+        ${me.face ? `<button class="btn btn-ghost" data-act="me-face-remove" aria-label="Retirer la photo">${icon('trash')}</button>` : ''}
+      </div>
+      <p class="hint">Une photo de face, bien éclairée. Elle reste sur ton téléphone : <b>elle n'est jamais envoyée à l'IA</b>. Elle est incluse dans ta sauvegarde exportée.</p></div>
+  </div>
+
+  <div class="section-title"><h2>Mon style</h2></div>
+  <div class="card set-group" style="padding:16px">
+    <div class="field"><div class="label">Mes styles préférés</div>
+      <div class="chips wrap">${STYLES.map((x) => `<button class="chip accent" data-act="me-style" data-v="${x.id}" aria-pressed="${(me.prefStyles || []).includes(x.id)}">${x.label}</button>`).join('')}</div></div>
+    <div class="field"><label class="label" for="me-note">Mon style en quelques mots</label><input id="me-note" class="input" maxlength="120" placeholder="Ex. oversize, tons terre, un peu vintage" value="${esc(me.styleNote || '')}" autocomplete="off"></div>
+    <label class="check-row"><input type="checkbox" id="me-share" ${me.share === false ? '' : 'checked'}><span><b>Adapter les coupes à ma morphologie</b><small>Envoie ma taille et mon poids à l'IA (Gemini) avec ma demande de tenue, rien d'autre. Ma photo n'est jamais envoyée.</small></span></label>
+    <p class="hint">Mes styles préférés et mes mots-clés sont utilisés par le styliste IA et par l'algorithme local.</p>
+  </div>
+
+  <div class="section-title"><h2>Progression</h2></div>
+  <div class="card set-group" style="padding:16px">
+    <div class="segmented" role="group" aria-label="Source des tenues">${pfBtn('ai', 'Tenues IA')}${pfBtn('local', 'Locales')}${pfBtn('all', 'Toutes')}</div>
+    ${hist.length ? `
+    <div class="pf-stats"><div><b>${sm.count}</b><span>tenue${sm.count > 1 ? 's' : ''}</span></div><div><b>${fmtRating(sm.avg)}</b><span>moyenne /10</span></div><div><b>${sm.best}</b><span>meilleure</span></div><div><b>${trend || '—'}</b><span>tendance</span></div></div>
+    <h3 class="pf-title">Cohérence de chaque tenue créée</h3>
+    ${state.pfTable ? `<table class="pf-table"><thead><tr><th>Date</th><th>Tenue</th><th>Source</th><th>Note</th></tr></thead><tbody>${rows}</tbody></table>` : chartSVG(hist)}
+    <p class="pf-tip" id="pf-tip" aria-live="polite">${state.pfTable ? '15 dernières tenues' : 'Touche un point pour voir la tenue.'}</p>
+    <button class="btn btn-sm btn-ghost" data-act="me-table">${state.pfTable ? 'Voir la courbe' : 'Voir en tableau'}</button>
+    <p class="hint">La note est celle que le styliste donne à la cohérence (couleurs, coupes, formalité). Elle mesure la tenue, pas toi. Chaque tenue affichée par le styliste ajoute un point.</p>`
+    : `<div class="empty" style="padding:20px 0 6px"><div class="big">${icon('sparkle')}</div><h3>Pas encore de courbe</h3><p>${state.pf === 'ai' ? 'Crée une tenue avec le styliste en mode IA' : 'Crée une tenue avec le styliste'} : chaque tenue ajoute un point à ta courbe.</p><button class="btn btn-primary" data-act="goto" data-to="styliste">${icon('sparkle')}Créer ma tenue</button></div>`}
+  </div>`;
+}
+
 // ================= RÉGLAGES =================
 let storageCache = null;
 function viewSettings() {
@@ -1080,6 +1200,7 @@ function viewSettings() {
   return `
   <header class="topbar"><a class="icon-btn" href="#/home" aria-label="Retour">${icon('left')}</a><h1 style="font-size:22px">Réglages</h1><span style="width:44px"></span></header>
 
+  <a class="card action-tile" href="#/profil" style="margin-bottom:14px"><span class="ico">${icon('user')}</span><span><strong>Mon profil &amp; progression</strong><small>Taille, style, avatar, courbe de tes tenues</small></span></a>
   <div class="section-title"><h2>Profil</h2></div>
   <div class="card set-group" style="padding:16px">
     <div class="segmented" role="group" aria-label="Profil">${GENDERS.map((g) => `<button data-act="set-gender" data-v="${g.id}" aria-pressed="${gender() === g.id}">${g.label}</button>`).join('')}</div>
@@ -1237,6 +1358,19 @@ const actions = {
     location.hash = '#/home'; render(true); window.scrollTo(0, 0);
     toast(el.dataset.v === 'f' ? 'Profil féminin activé' : 'Profil masculin activé');
   },
+  'me-skin': async (el) => { await saveMe({ skin: el.dataset.v }); rerender(); },
+  'me-style': async (el) => {
+    const cur = new Set(meVal().prefStyles || []);
+    cur.has(el.dataset.v) ? cur.delete(el.dataset.v) : cur.add(el.dataset.v);
+    await saveMe({ prefStyles: [...cur] }); rerender();
+  },
+  'me-face-remove': async () => {
+    const old = meVal().face; await saveMe({ face: null });
+    if (old) await deletePhotos([old]);
+    rerender(); toast('Photo retirée');
+  },
+  'me-pf': (el) => { state.pf = el.dataset.v; rerender(); },
+  'me-table': () => { state.pfTable = !state.pfTable; rerender(); },
   'set-gender': async (el) => {
     state.profile = { gender: el.dataset.v }; await setMeta('profile', state.profile); applyProfile();
     state.w.cat = 'all'; rerender(); toast('Profil modifié');
@@ -1278,8 +1412,43 @@ document.addEventListener('input', (e) => {
   }
   if (e.target.dataset?.stText) state.st[e.target.dataset.stText] = e.target.value;
 });
-document.addEventListener('change', (e) => {
-  if (e.target.dataset?.stRange === 'formality') rerender();
+document.addEventListener('click', (e) => {
+  const hit = e.target.closest('.ch-hit');
+  if (!hit) return;
+  const h = filterHistory(state.history, state.pf)[Number(hit.dataset.i)];
+  const tip = $('#pf-tip');
+  if (h && tip) tip.textContent = `${h.title} · ${h.rating}/10 · ${fmtDate(h.at)} · ${h.source === 'ai' ? 'créée par l\'IA' : 'algorithme local'}`;
+});
+document.addEventListener('change', async (e) => {
+  const t = e.target;
+  if (t.id === 'me-height' || t.id === 'me-weight') {
+    const raw = t.value.trim();
+    const [lo, hi, key, label] = t.id === 'me-height' ? [120, 215, 'height', 'La taille'] : [30, 250, 'weight', 'Le poids'];
+    if (raw === '') { await saveMe({ [key]: null }); refreshMeAvatar(); return; }
+    const v = Number(raw.replace(',', '.'));
+    if (!(v >= lo && v <= hi)) { toast(`${label} doit être entre ${lo} et ${hi}.`, { type: 'error' }); t.value = meVal()[key] ?? ''; return; }
+    await saveMe({ [key]: Math.round(v * 10) / 10 }); refreshMeAvatar(); toast('Profil enregistré', { timeout: 1200 });
+  }
+  if (t.id === 'me-note') { await saveMe({ styleNote: t.value.trim().slice(0, 120) }); toast('Profil enregistré', { timeout: 1200 }); }
+  if (t.id === 'me-share') { await saveMe({ share: t.checked }); }
+  if (t.matches?.('[data-me-face]') && t.files?.[0]) {
+    const file = t.files[0]; t.value = '';
+    try {
+      const img = await loadImage(file);
+      // recadrage portrait 3:4 au centre, 600×800
+      const c = document.createElement('canvas'); c.width = 600; c.height = 800;
+      const g = c.getContext('2d');
+      const ar = 3 / 4; let sw = img.width, sh = img.width / ar;
+      if (sh > img.height) { sh = img.height; sw = sh * ar; }
+      g.drawImage(img, (img.width - sw) / 2, Math.max(0, (img.height - sh) / 2 - img.height * 0.04), sw, sh, 0, 0, 600, 800);
+      const blob = await new Promise((res, rej) => c.toBlob((b) => (b ? res(b) : rej(new Error('Photo illisible.'))), 'image/jpeg', 0.85));
+      const pid = await savePhoto(blob);
+      const old = meVal().face; await saveMe({ face: pid });
+      if (old) await deletePhotos([old]);
+      rerender(); toast('Photo enregistrée sur ton téléphone');
+    } catch (err) { toast(err.message || 'Photo illisible.', { type: 'error' }); }
+  }
+  if (t.dataset?.stRange === 'formality') rerender();
   if (e.target.id === 'import-file') { doImport(e.target.files[0]); e.target.value = ''; }
 });
 

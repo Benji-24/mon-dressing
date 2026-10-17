@@ -46,6 +46,7 @@ export function normalizeRequest(req = {}) {
     avoid: req.avoidColors || [],
     must: req.mustItems || [],
     shoesId: req.shoesId || null,
+    prefStyles: Array.isArray(req.prefStyles) ? req.prefStyles : [],
   };
 }
 
@@ -55,6 +56,7 @@ function itemScore(it, r) {
   s += 3 * (1 - Math.abs(f - r.target) / 4);
   const wanted = STYLE_REQ_TO_ITEM[r.style] || [];
   if (wanted.includes(it.style)) s += 1;
+  if (r.prefStyles?.includes(it.style)) s += 0.6; // style préféré du profil
   if (it.seasons?.length && !it.seasons.includes(r.season)) s -= 1;
   if (allColors(it).some((c) => r.prefer.includes(c))) s += 0.7;
   if (it.status === 'porte') s -= 0.2;

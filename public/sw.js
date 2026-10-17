@@ -1,6 +1,6 @@
 // Service worker DRIP : permet d'ouvrir l'application même sans réseau.
-const VERSION = 'drip-v1.2.0';
-const SHELL = ['./', 'index.html', 'app.css', 'manifest.webmanifest', 'js/app.js', 'js/catalog.js', 'js/db.js', 'js/api.js', 'js/stylist.js', 'js/cutout.js', 'js/collage.js', 'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png'];
+const VERSION = 'drip-v1.3.0';
+const SHELL = ['./', 'index.html', 'app.css', 'manifest.webmanifest', 'js/app.js', 'js/catalog.js', 'js/db.js', 'js/api.js', 'js/stylist.js', 'js/cutout.js', 'js/collage.js', 'js/avatar.js', 'js/progress.js', 'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png'];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(VERSION).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
