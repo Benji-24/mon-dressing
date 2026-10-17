@@ -270,6 +270,26 @@ try:
         page.wait_for_function("window.__drip.state.me && window.__drip.state.me.face", timeout=8000)
         page.wait_for_selector('#me-avatar-img:not([hidden])'); page.wait_for_timeout(600)
         check('Visage enregistré localement', bool(S()['me']['face']))
+        # Retourner (effet miroir) : photo de test rouge à gauche / bleue à droite
+        from PIL import Image
+        im = Image.new('RGB', (600, 800), (220, 30, 30)); im.paste((30, 30, 220), (300, 0, 600, 800)); half = SHOTS / 'moitie.jpg'; im.save(half, quality=95)
+        px_face = """async () => { const { db } = await import('/js/db.js'); const rec = await db.get('photos', window.__drip.state.me.face);
+          const b = await createImageBitmap(new Blob([rec.data], { type: rec.type })); const c = document.createElement('canvas'); c.width = b.width; c.height = b.height;
+          const g = c.getContext('2d'); g.drawImage(b, 0, 0); return [Array.from(g.getImageData(40, 400, 1, 1).data), Array.from(g.getImageData(560, 400, 1, 1).data)]; }"""
+        before_id = S()['me']['face']
+        page.set_input_files('[data-me-face="cam"]', str(half)); page.wait_for_function("window.__drip.state.me.face !== %r" % before_id, timeout=8000)
+        l0, r0 = page.evaluate(px_face)
+        check('Photo prise à l\'appareil : sens d\'origine conservé (gauche rouge)', l0[0] > 150 and r0[2] > 150, (l0, r0))
+        page.click('[data-act="me-face-flip"]'); page.wait_for_function("window.__drip.state.me.flipCamera === true", timeout=8000); page.wait_for_timeout(300)
+        l1, r1 = page.evaluate(px_face)
+        check('Bouton « Retourner » : image inversée gauche/droite', l1[2] > 150 and r1[0] > 150, (l1, r1))
+        id_after_flip = S()['me']['face']
+        page.set_input_files('[data-me-face="cam"]', str(half)); page.wait_for_function("window.__drip.state.me.face !== %r" % id_after_flip, timeout=8000)
+        l2, r2 = page.evaluate(px_face)
+        check('Choix retenu : la photo suivante prise à l\'appareil est retournée d\'office', l2[2] > 150 and r2[0] > 150, (l2, r2))
+        page.set_input_files('[data-me-face="gallery"]', str(half)); page.wait_for_function("window.__drip.state.me.faceSource === 'gallery'", timeout=8000); page.wait_for_timeout(300)
+        l3, r3 = page.evaluate(px_face)
+        check('Photo de la galerie : jamais retournée automatiquement', l3[0] > 150 and r3[2] > 150, (l3, r3))
         shot('13b-profil')
         # courbe : un point par tenue IA créée
         n_ai = sum(1 for h in S()['history'] if h['source'] == 'ai')
@@ -278,7 +298,8 @@ try:
         check('Courbe : un point par tenue IA', page.locator('.chart .ch-dot').count() == min(n_ai, 60), page.locator('.chart .ch-dot').count())
         page.locator('.chart .ch-hit').last.click(force=True)
         check('Courbe : toucher un point affiche la tenue', '/10' in page.inner_text('#pf-tip'), page.inner_text('#pf-tip'))
-        page.click('[data-act="me-table"]'); page.wait_for_selector('.pf-table')
+        page.click('[data-act="me-table"]')
+        page.wait_for_selector('.pf-table')
         check('Courbe : vue en tableau', page.locator('.pf-table tbody tr').count() >= 1)
         page.click('[data-act="me-table"]'); page.click('[data-act="me-pf"][data-v="all"]'); page.wait_for_selector('.chart')
         check('Courbe : filtre « Toutes » (IA + locales)', page.locator('.chart .ch-dot').count() == min(len(S()['history']), 60))
@@ -341,7 +362,7 @@ try:
         ctx.set_offline(False)
 
         # 17. Pas de débordement horizontal
-        for r_ in ['home', 'dressing', 'styliste', 'favoris', 'reglages']:
+        for r_ in ['home', 'dressing', 'styliste', 'favoris', 'reglages', 'profil']:
             page2.goto(URL + '#/' + r_); page2.wait_for_timeout(250)
             w = page2.evaluate('document.documentElement.scrollWidth')
             check(f'Pas de défilement horizontal ({r_})', w <= 402, w)

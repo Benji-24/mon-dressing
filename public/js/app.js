@@ -1156,12 +1156,12 @@ function viewMe() {
     <div class="field"><div class="label">Teint de l'avatar</div>
       <div class="swatches">${SKIN_TONES.map((t) => `<button class="swatch-btn" data-act="me-skin" data-v="${t.id}" aria-pressed="${(me.skin || 'moyen') === t.id}" aria-label="${t.label}"><span style="background:${t.hex}"></span></button>`).join('')}</div></div>
     <div class="field"><div class="label">Ma photo de visage</div>
-      <div class="btn-row">
-        <label class="btn" style="cursor:pointer">${icon('camera')}Prendre<input type="file" accept="image/*" capture="user" class="sr" data-me-face></label>
-        <label class="btn" style="cursor:pointer">${icon('image')}Galerie<input type="file" accept="image/*" class="sr" data-me-face></label>
-        ${me.face ? `<button class="btn btn-ghost" data-act="me-face-remove" aria-label="Retirer la photo">${icon('trash')}</button>` : ''}
+      <div class="btn-row" style="flex-wrap:wrap">
+        <label class="btn" style="cursor:pointer">${icon('camera')}Prendre<input type="file" accept="image/*" capture="user" class="sr" data-me-face="cam"></label>
+        <label class="btn" style="cursor:pointer">${icon('image')}Galerie<input type="file" accept="image/*" class="sr" data-me-face="gallery"></label>
+        ${me.face ? `<button class="btn" data-act="me-face-flip">${icon('refresh')}Retourner</button><button class="btn btn-ghost" data-act="me-face-remove" aria-label="Retirer la photo">${icon('trash')}</button>` : ''}
       </div>
-      <p class="hint">Une photo de face, bien éclairée. Elle reste sur ton téléphone : <b>elle n'est jamais envoyée à l'IA</b>. Elle est incluse dans ta sauvegarde exportée.</p></div>
+      <p class="hint">Une photo de face, bien éclairée. Si elle est à l'envers de ce que tu attends (effet miroir), touche « Retourner » : ton choix est retenu pour les prochaines photos prises avec l'appareil. Elle reste sur ton téléphone : <b>elle n'est jamais envoyée à l'IA</b>. Elle est incluse dans ta sauvegarde exportée.</p></div>
   </div>
 
   <div class="section-title"><h2>Mon style</h2></div>
@@ -1364,6 +1364,18 @@ const actions = {
     cur.has(el.dataset.v) ? cur.delete(el.dataset.v) : cur.add(el.dataset.v);
     await saveMe({ prefStyles: [...cur] }); rerender();
   },
+  'me-face-flip': async () => {
+    const old = meVal().face; if (!old) return;
+    const img = await loadImage(await blobOfPhoto(old));
+    const c = document.createElement('canvas'); c.width = img.width; c.height = img.height;
+    const g = c.getContext('2d'); g.translate(c.width, 0); g.scale(-1, 1); g.drawImage(img, 0, 0);
+    const blob = await new Promise((res, rej) => c.toBlob((b) => (b ? res(b) : rej(new Error('Retournement impossible.'))), 'image/jpeg', 0.88));
+    const pid = await savePhoto(blob);
+    const patch = { face: pid };
+    if (meVal().faceSource === 'cam') patch.flipCamera = !meVal().flipCamera; // retenu pour les prochaines photos prises à l'appareil
+    await saveMe(patch); await deletePhotos([old]);
+    rerender(); toast('Photo retournée');
+  },
   'me-face-remove': async () => {
     const old = meVal().face; await saveMe({ face: null });
     if (old) await deletePhotos([old]);
@@ -1440,10 +1452,12 @@ document.addEventListener('change', async (e) => {
       const g = c.getContext('2d');
       const ar = 3 / 4; let sw = img.width, sh = img.width / ar;
       if (sh > img.height) { sh = img.height; sw = sh * ar; }
+      const fromCam = t.dataset.meFace === 'cam';
+      if (fromCam && meVal().flipCamera) { g.translate(600, 0); g.scale(-1, 1); }
       g.drawImage(img, (img.width - sw) / 2, Math.max(0, (img.height - sh) / 2 - img.height * 0.04), sw, sh, 0, 0, 600, 800);
       const blob = await new Promise((res, rej) => c.toBlob((b) => (b ? res(b) : rej(new Error('Photo illisible.'))), 'image/jpeg', 0.85));
       const pid = await savePhoto(blob);
-      const old = meVal().face; await saveMe({ face: pid });
+      const old = meVal().face; await saveMe({ face: pid, faceSource: fromCam ? 'cam' : 'gallery' });
       if (old) await deletePhotos([old]);
       rerender(); toast('Photo enregistrée sur ton téléphone');
     } catch (err) { toast(err.message || 'Photo illisible.', { type: 'error' }); }
