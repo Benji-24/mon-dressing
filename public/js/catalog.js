@@ -84,6 +84,14 @@ export const STATUSES = [
   { id: 'lavage', label: 'Au lavage', long: 'En cours de lavage', available: false },
 ];
 
+// Réglage « dans le styliste » : à quelle fréquence tu veux que cette pièce soit proposée
+export const WEAR_PREFS = [
+  { id: 'often', label: 'Souvent' },
+  { id: 'normal', label: 'Normal' },
+  { id: 'rare', label: 'Rarement' },
+  { id: 'never', label: 'Jamais' },
+];
+
 export const OCCASIONS = [
   { id: 'quotidien', label: 'Quotidien', formality: 2.5 },
   { id: 'cours', label: 'Cours', formality: 2.5 },

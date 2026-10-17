@@ -157,7 +157,7 @@ try:
         check('Statut « au sale » conservé après rechargement', tee['status'] == 'sale', tee['status'])
 
         # 8. Modification + suppression
-        chino = next(i for i in S()['items'] if i['name'] == 'Chino beige')
+        chino = next(i for i in S()['items'] if i['name'].startswith('Chino beige'))
         page.click(f'[data-act="open-item"][data-id="{chino["id"]}"]'); page.wait_for_selector('.detail-title')
         page.click('[data-edit]'); page.wait_for_selector('#f-name >> nth=0')
         page.locator('#f-name').last.fill('Chino beige droit')
@@ -326,6 +326,61 @@ try:
         check('Aperçu avatar : image 1080×1350', dims == [1080, 1350], dims)
         check('Aperçu avatar : onglet actif', page.locator('[data-pv="avatar"][aria-pressed="true"]').count() == 1)
         shot('13d-avatar-tenue')
+        close_sheets()
+
+        # 13c. Avatar IA : consentement pour le visage + image reçue
+        import urllib.request
+        stats = lambda: json.loads(urllib.request.urlopen(URL + '__stats').read())
+        page.goto(URL + '#/favoris'); page.wait_for_selector('.fav'); page.click('.fav'); page.wait_for_selector('.sheet [data-preview]')
+        page.click('[data-preview]'); page.wait_for_selector('.preview-img', timeout=15000)
+        page.click('[data-pv="ai"]'); page.wait_for_selector('[data-ai-go]')
+        check('Avatar IA : avertissement sur le quota et la fiabilité', 'quota' in page.locator('.sheet-body').last.inner_text().lower() and 'écarter' in page.locator('.sheet-body').last.inner_text(), page.locator('.sheet-body').last.inner_text()[:300])
+        shot('13e-avatar-ia-intro')
+        page.evaluate("window.__drip.state.me.faceToAI = false")  # pas encore de consentement
+        page.click('[data-ai-go]'); page.wait_for_selector('.dialog')
+        check('Avatar IA : demande de consentement avant d\'envoyer le visage', 'photo' in page.inner_text('.dialog').lower() and page.locator('.dialog .btn').count() == 3)
+        page.click('.dialog >> text=Sans ma photo')
+        page.wait_for_selector('.preview-img', timeout=20000)
+        st_ = stats()['avatar']
+        check('Sans accord : aucune photo de visage envoyée (seulement les vêtements)', st_['withFace'] is False, st_)
+        check('Avatar IA : image affichée et mention « générée par IA »', page.evaluate("document.querySelector('.preview-img').naturalWidth") >= 1 and 'générée par IA' in page.locator('.sheet-body').last.inner_text(), page.locator('.sheet-body').last.inner_text()[:300])
+        check('Avatar IA : enregistrer/partager disponible', page.locator('[data-save-img]').count() == 1)
+        check('Sans accord, le consentement n\'est pas mémorisé', S()['me'].get('faceToAI') in (False, None))
+        close_sheets()
+        # avec accord
+        page.goto(URL + '#/favoris'); page.wait_for_selector('.fav'); page.click('.fav'); page.wait_for_selector('.sheet [data-preview]')
+        page.click('[data-preview]'); page.wait_for_selector('.preview-img'); page.click('[data-pv="ai"]'); page.wait_for_selector('[data-ai-go]')
+        page.click('[data-ai-go]'); page.wait_for_selector('.dialog'); page.click('.dialog >> text=Envoyer ma photo')
+        page.wait_for_selector('.preview-img', timeout=20000)
+        st2 = stats()['avatar']
+        check('Avec accord : visage + vêtements envoyés, accord mémorisé', st2['withFace'] is True and S()['me']['faceToAI'] is True, st2)
+        shot('13f-avatar-ia')
+        close_sheets()
+
+        # 13d. Réglage par vêtement dans le styliste
+        page.evaluate("Object.assign(window.__drip.state.w, { status: 'all', cat: 'all', q: '' })")
+        page.goto(URL + '#/dressing'); page.wait_for_selector('.grid')
+        jean = next(i for i in S()['items'] if i['name'] == 'Jean brut')
+        page.click(f'[data-act="open-item"][data-id="{jean["id"]}"]'); page.wait_for_selector('[data-wp]')
+        page.click('[data-wp="never"]'); page.wait_for_timeout(300)
+        check('Pièce réglée sur « Jamais » (enregistré)', next(i for i in S()['items'] if i['id'] == jean['id'])['wearPref'] == 'never')
+        check('Pastille « jamais » visible sur la carte', page.evaluate("document.querySelector('.pref-tag') !== null"))
+        close_sheets()
+        page.evaluate("window.__drip.state.items.forEach(i => { i.status = 'propre'; })")
+        page.goto(URL + '#/styliste'); page.wait_for_selector('.mode-switch')
+        page.click('[data-act="st-mode"][data-v="local"]'); page.click('[data-act="st-generate"]'); page.wait_for_timeout(800)
+        txt = page.locator('main').inner_text()
+        check('Styliste local : le jean « Jamais » n\'est pas proposé, et l\'app explique pourquoi', 'Jamais' in txt and 'Impossible de composer' in txt, txt[-300:])
+        page.click('[data-act="st-mode"][data-v="ai"]'); page.click('[data-act="st-generate"]'); page.wait_for_timeout(1500)
+        o = S()['st']['result']['outfit']
+        check('Styliste IA : pas de pièce « Jamais » non plus', o is None or o['slots']['bottom'] != jean['id'])
+        # formulaire : raison
+        page.goto(URL + '#/dressing'); page.wait_for_selector('.grid')
+        chino = next(i for i in S()['items'] if i['id'] != jean['id'])
+        page.click(f'[data-act="open-item"][data-id="{chino["id"]}"]'); page.wait_for_selector('[data-edit]'); page.click('[data-edit]'); page.wait_for_selector('#f-wearnote')
+        page.click('[data-k="wearPref"][data-v="rare"]'); page.fill('#f-wearnote', 'trop fin'); page.click('[data-save]'); page.wait_for_selector('#f-wearnote', state='detached', timeout=5000)
+        it_ = next(i for i in S()['items'] if i['id'] == chino['id'])
+        check('Formulaire : « Rarement » + raison enregistrés', it_['wearPref'] == 'rare' and it_['wearNote'] == 'trop fin', (it_.get('wearPref'), it_.get('wearNote')))
         close_sheets()
 
         # 14. Persistance après fermeture totale du navigateur (même profil)

@@ -18,6 +18,11 @@ globalThis.fetch = async (url, init) => {
   stats.gemini++;
   const body = JSON.parse(init.body);
   const parts = body.contents[0].parts;
+  if (body.generationConfig?.responseModalities?.includes('IMAGE')) {
+    // Faux modèle d'image : on mémorise ce qui a été envoyé (pour vérifier la confidentialité) et on renvoie un PNG 1×1
+    stats.avatar = { images: parts.filter((p) => p.inlineData).length, withFace: /same identity/.test(parts[0].text), prompt: parts[0].text };
+    return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ inlineData: { mimeType: 'image/png', data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==' } }] } }] }), { headers: { 'content-type': 'application/json' } });
+  }
   let out;
   if (parts.some((p) => p.inlineData)) {
     out = { isClothing: true, name: 'Sweat à capuche gris', category: 'pulls', primaryColor: 'gris', secondaryColors: ['noir'], fit: 'oversize', style: 'streetwear', seasons: ['automne', 'hiver'], visibleBrand: null, confidence: 'haute', remark: 'Coupe estimée sur photo à plat.' };
@@ -51,6 +56,7 @@ const env = {
 http.createServer(async (req, res) => {
   const chunks = [];
   for await (const c of req) chunks.push(c);
+  if (req.url === '/__stats') { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(stats)); return; }
   const request = new Request(`http://localhost:${PORT}${req.url}`, { method: req.method, headers: req.headers, body: ['GET', 'HEAD'].includes(req.method) ? undefined : Buffer.concat(chunks) });
   const r = await worker.fetch(request, env);
   res.writeHead(r.status, Object.fromEntries(r.headers));

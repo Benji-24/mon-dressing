@@ -1,10 +1,11 @@
-import { CATEGORIES, GENDERS, categoriesFor, COLORS, FITS, STYLES, SEASONS, STATUSES, OCCASIONS, STYLE_REQUESTS, catOf, colorOf, statusOf, isAvailable, seasonForDate } from './catalog.js';
+import { CATEGORIES, GENDERS, categoriesFor, COLORS, FITS, STYLES, SEASONS, STATUSES, OCCASIONS, STYLE_REQUESTS, WEAR_PREFS, catOf, colorOf, statusOf, isAvailable, seasonForDate } from './catalog.js';
 import { db, uid, savePhoto, photoURL, deletePhotos, exportAll, importAll, storageInfo, requestPersist, getMeta, setMeta } from './db.js';
 import { api, settings, loadImage, resizeTo, blobToBase64, fetchWeather } from './api.js';
 import { generateOutfits, pickNext } from './stylist.js';
 import { makeSticker } from './cutout.js';
 import { renderOutfitImage } from './collage.js';
 import { renderAvatar, SKIN_TONES, skinHex } from './avatar.js';
+import { extractImage, b64ToBlob } from './aiavatar.js';
 import { addHistory, filterHistory, summary, chartSVG, fmtRating } from './progress.js';
 
 // ================= Utilitaires =================
@@ -313,7 +314,7 @@ function itemCard(it) {
   return `<article class="item-card ${isAvailable(it) ? '' : 'unavailable'}">
     <button style="display:block;width:100%;text-align:left" data-act="open-item" data-id="${it.id}" aria-label="${esc(it.name)}">
       ${photoBox(it)}
-      <div class="meta"><strong>${esc(it.name)}</strong><small>${swatch(it.primaryColor, 10)}${esc(catOf(it.category)?.short || '')}${it.brand ? ' · ' + esc(it.brand) : ''}</small></div>
+      <div class="meta"><strong>${esc(it.name)}</strong><small>${swatch(it.primaryColor, 10)}${esc(catOf(it.category)?.short || '')}${it.brand ? ' · ' + esc(it.brand) : ''}${it.wearPref === 'never' ? ' · <span class="pref-tag">jamais</span>' : it.wearPref === 'rare' ? ' · <span class="pref-tag">rarement</span>' : it.wearPref === 'often' ? ' · <span class="pref-tag often">souvent</span>' : ''}</small></div>
     </button>
     <button class="status-btn" data-act="cycle-status" data-id="${it.id}" aria-label="Statut : ${esc(st.label)}. Toucher pour changer"><i class="dot" style="background:${statusColor(it.status)}"></i>${esc(st.label)}</button>
   </article>`;
@@ -412,6 +413,9 @@ function openItem(id) {
           <p class="muted" style="margin:0">${esc(catOf(it.category)?.label)}${it.brand ? ' · ' + esc(it.brand) : ''}</p>
           <div class="status-seg" role="group" aria-label="Statut">${STATUSES.map((s) => `<button data-st="${s.id}" aria-pressed="${it.status === s.id}" style="${it.status === s.id ? `color:${statusColor(s.id)}` : ''}"><i class="dot" style="background:${statusColor(s.id)}"></i>${s.label}</button>`).join('')}</div>
           <button class="btn btn-block" style="margin-top:10px" data-wear>${icon('hand')}Je le porte aujourd'hui</button>
+          <div class="label" style="margin:18px 0 8px">Dans le styliste</div>
+          <div class="status-seg" role="group" aria-label="Dans le styliste">${WEAR_PREFS.map((w) => `<button data-wp="${w.id}" aria-pressed="${(it.wearPref || 'normal') === w.id}">${w.label}</button>`).join('')}</div>
+          ${it.wearNote ? `<p class="hint">« ${esc(it.wearNote)} »</p>` : ''}
           <div class="rows">
             ${row('Couleur', `${swatch(it.primaryColor)} ${esc(colorOf(it.primaryColor)?.label || '—')}`)}
             ${row('Couleurs secondaires', (it.secondaryColors || []).map((c) => `${swatch(c)} ${esc(colorOf(c)?.label)}`).join(' &nbsp;'))}
@@ -433,6 +437,13 @@ function openItem(id) {
     if (!it) return;
     const st = e.target.closest('[data-st]');
     if (st) { haptic(); await setStatus([id], st.dataset.st); sh.refresh(); rerender(); return; }
+    const wp = e.target.closest('[data-wp]');
+    if (wp) {
+      const upd = { ...it, wearPref: wp.dataset.wp, updatedAt: new Date().toISOString() };
+      await db.put('items', upd); state.items[state.items.indexOf(it)] = upd;
+      toast(wp.dataset.wp === 'never' ? 'Le styliste ne proposera plus cette pièce' : wp.dataset.wp === 'rare' ? 'Le styliste la proposera rarement' : wp.dataset.wp === 'often' ? 'Le styliste la proposera plus souvent' : 'Réglage normal', { timeout: 1800 });
+      sh.refresh(); rerender(); return;
+    }
     if (e.target.closest('[data-wear]')) {
       const upd = { ...it, status: 'porte', wearCount: (it.wearCount || 0) + 1, lastWorn: new Date().toISOString(), updatedAt: new Date().toISOString() };
       await db.put('items', upd); state.items[state.items.indexOf(it)] = upd;
@@ -451,7 +462,7 @@ function openItem(id) {
 function refreshOpenSheets() { sheets.forEach((s) => { if (s.kind === 'item' || s.kind === 'outfit') s.refresh(); }); }
 
 // ================= AJOUT / MODIFICATION =================
-const BLANK = () => ({ name: '', category: null, primaryColor: null, secondaryColors: [], brand: '', size: '', fit: null, style: null, seasons: [], status: 'propre', notes: '', photos: [], sticker: null });
+const BLANK = () => ({ name: '', category: null, primaryColor: null, secondaryColors: [], brand: '', size: '', fit: null, style: null, seasons: [], status: 'propre', notes: '', photos: [], sticker: null, wearPref: 'normal', wearNote: '' });
 
 async function blobOfPhoto(id) {
   const rec = id ? await db.get('photos', id) : null;
@@ -467,6 +478,8 @@ async function stickerFromPhoto(photoId, onStatus) {
 
 function openItemForm(existing = null, { startWith } = {}) {
   const d = existing ? JSON.parse(JSON.stringify(existing)) : BLANK();
+  if (!d.wearPref) d.wearPref = 'normal';
+  if (d.wearNote == null) d.wearNote = '';
   const addedPhotos = [];
   const removedPhotos = [];
   const ai = { status: 'idle', fields: new Set(), msg: '', remark: '', confidence: null };
@@ -527,6 +540,9 @@ function openItemForm(existing = null, { startWith } = {}) {
             <div><label for="f-size" class="label" style="display:block;margin-bottom:8px">Taille</label><input id="f-size" class="input" data-text="size" value="${esc(d.size)}" placeholder="M, 42, 32/32…" maxlength="20" autocomplete="off"></div>
           </div>
           <div class="field"><div class="label">Disponibilité</div>${chipGroup('status', STATUSES)}</div>
+          <div class="field"><div class="label">Dans le styliste</div>${chipGroup('wearPref', WEAR_PREFS)}
+            <input id="f-wearnote" class="input" style="margin-top:10px" data-text="wearNote" value="${esc(d.wearNote)}" placeholder="Pourquoi ? (ex. trop fin, je ne le mets plus)" maxlength="80" autocomplete="off">
+            <p class="hint">« Souvent » : proposé plus volontiers. « Rarement » : proposé seulement si c'est vraiment le meilleur choix. « Jamais » : jamais proposé (sauf si tu l'imposes).</p></div>
           <div class="field"><label for="f-notes">Notes</label><textarea id="f-notes" class="input" data-text="notes" placeholder="Facultatif : matière, où l'acheter, entretien…" maxlength="500">${esc(d.notes)}</textarea></div>`,
         foot: `<button type="button" class="btn btn-ghost" data-cancel>Annuler</button><button type="button" class="btn btn-primary" data-save ${ai.status === 'loading' || stk.status === 'loading' ? 'disabled' : ''}>${icon('check')}Enregistrer</button>`,
       };
@@ -663,7 +679,7 @@ function openItemForm(existing = null, { startWith } = {}) {
         id: existing?.id || uid(),
         name: d.name.trim(), category: d.category, primaryColor: d.primaryColor,
         secondaryColors: d.secondaryColors.filter((c) => c !== d.primaryColor), brand: d.brand.trim(), size: d.size.trim(),
-        fit: d.fit, style: d.style, seasons: d.seasons, status: d.status || 'propre', notes: d.notes.trim(), photos: d.photos, sticker: d.sticker || null,
+        fit: d.fit, style: d.style, seasons: d.seasons, status: d.status || 'propre', notes: d.notes.trim(), photos: d.photos, sticker: d.sticker || null, wearPref: d.wearPref || 'normal', wearNote: d.wearNote.trim(),
         wearCount: existing?.wearCount || 0, lastWorn: existing?.lastWorn || null,
         createdAt: existing?.createdAt || now, updatedAt: now,
       };
@@ -816,7 +832,8 @@ function weatherNote(req) {
 
 function validateClientOutfit(o) {
   const ids = outfitPieces(o);
-  return ids.every((id) => { const it = itemById(id); return it && isAvailable(it); });
+  const must = state.st.mustItems || [];
+  return ids.every((id) => { const it = itemById(id); return it && isAvailable(it) && (it.wearPref !== 'never' || must.includes(id)); });
 }
 
 async function generate({ another = false } = {}) {
@@ -846,7 +863,7 @@ async function generate({ another = false } = {}) {
   if (useAI) {
     s.loading = true; updateGenerateBtn();
     try {
-      const items = state.items.map(({ id, name, category, primaryColor, secondaryColors, fit, style, seasons, status }) => ({ id, name, category, primaryColor, secondaryColors, fit, style, seasons, status }));
+      const items = state.items.map(({ id, name, category, primaryColor, secondaryColors, fit, style, seasons, status, wearPref, wearNote }) => ({ id, name, category, primaryColor, secondaryColors, fit, style, seasons, status, wearPref, wearNote }));
       const weather = s.tempMode === 'live' && s.weather ? { source: 'live', ...s.weather } : null;
       const res = await api.style({ request: req, items, weather, excludeKeys: s.shownKeys, profile: aiProfile() });
       const all = (res.outfits || []).filter(validateClientOutfit);
@@ -990,7 +1007,7 @@ async function outfitPieceImages(o) {
       const b = pid ? await blobOfPhoto(pid) : null;
       if (b) { img = await loadImage(b); kind = it.sticker ? 'sticker' : 'photo'; }
     } catch { /* on retombe sur la pastille de couleur */ }
-    pieces.push({ id: it.id, role, name: it.name, category: it.category, img, kind, color: colorOf(it.primaryColor)?.hex });
+    pieces.push({ id: it.id, role, name: it.name, category: it.category, img, kind, color: colorOf(it.primaryColor)?.hex, colorLabel: colorOf(it.primaryColor)?.label });
   }
   return pieces;
 }
@@ -1002,23 +1019,32 @@ function openOutfitPreview(o, startView = 'stickers') {
     title: 'Aperçu de la tenue',
     full: true,
     render: () => {
-      const tabs = `<div class="segmented" role="group" aria-label="Type d'aperçu"><button data-pv="stickers" aria-pressed="${st.view === 'stickers'}">Stickers</button><button data-pv="avatar" aria-pressed="${st.view === 'avatar'}">Sur mon avatar</button></div>`;
+      const tabs = `<div class="segmented" role="group" aria-label="Type d'aperçu"><button data-pv="stickers" aria-pressed="${st.view === 'stickers'}">Stickers</button><button data-pv="avatar" aria-pressed="${st.view === 'avatar'}">Mon avatar</button><button data-pv="ai" aria-pressed="${st.view === 'ai'}">Avatar IA</button></div>`;
       const url = st.urls[st.view];
       let body;
-      if (st.err) body = `<div class="warn bad" style="margin-top:12px">${icon('alert')}<span>${esc(st.err)}</span></div>`;
+      if (st.view === 'ai' && !url) {
+        const ready = aiReady();
+        body = st.aiBusy
+          ? `<div class="empty"><span class="spinner" style="color:var(--accent)"></span><p><b>Création de ton avatar…</b><br>Ça prend en général 20 à 60 secondes. Garde l'app ouverte.</p></div>`
+          : `${st.aiErr ? `<div class="warn bad" style="margin-top:12px">${icon('alert')}<span>${esc(st.aiErr)}</span></div>` : ''}
+             <div class="card" style="padding:16px;margin-top:12px"><b>Avatar réaliste généré par IA</b>
+               <p class="muted" style="margin:8px 0 12px">Gemini crée une image de toi portant cette tenue, d'après tes mensurations, ta photo de visage (seulement si tu l'autorises) et les photos de tes vêtements. Une génération utilise ton quota Google, et le résultat peut s'écarter de la réalité (visage, coupe, détails).</p>
+               ${ready ? `<button type="button" class="btn btn-primary btn-block" data-ai-go>${icon('sparkle')}${st.aiErr ? 'Réessayer' : 'Générer mon avatar IA'}</button>` : `<div class="warn">${icon('info')}<span>L'IA n'est pas connectée : ${esc(aiOffReason())}</span></div>`}</div>`;
+      } else if (st.err) body = `<div class="warn bad" style="margin-top:12px">${icon('alert')}<span>${esc(st.err)}</span></div>`;
       else if (!url) body = `<div class="empty"><span class="spinner" style="color:var(--accent)"></span><p>Composition de l'image…</p></div>`;
       else {
         const hasBody = !!(state.me && (state.me.height || state.me.face));
         const hint = st.view === 'avatar'
           ? `${hasBody ? '' : `<p class="hint">Cet avatar utilise des proportions moyennes. Renseigne ta taille, ton poids et ta photo dans <a href="#/profil" data-go-profil style="color:var(--accent)">Mon profil</a> pour qu'il te ressemble.</p>`}${st.noSticker.length ? `<p class="hint">${plural(st.noSticker.length, 'pièce n\'a pas', 'pièces n\'ont pas')} de sticker (${st.noSticker.map(esc).join(', ')}) : une forme de la bonne couleur la remplace.</p>` : ''}`
           : (st.noSticker.length ? `<p class="hint">${plural(st.noSticker.length, 'pièce n\'a pas', 'pièces n\'ont pas')} de sticker (${st.noSticker.map(esc).join(', ')}) : leur photo est utilisée à la place. Ouvre la pièce › Modifier › « Créer le sticker ».</p>` : '');
-        body = `<img class="preview-img" style="margin-top:12px" src="${url}" alt="Aperçu de la tenue : ${esc(o.title)}">${hint}`;
+        body = `<img class="preview-img" style="margin-top:12px" src="${url}" alt="Aperçu de la tenue : ${esc(o.title)}">${st.view === 'ai' ? '<p class="hint">Image générée par IA : le visage et les détails peuvent différer de la réalité. Les vêtements sont recréés d\'après tes photos.</p>' : hint}`;
       }
       return { body: tabs + body, foot: url ? `<button type="button" class="btn btn-primary" data-save-img>${icon('download')}Enregistrer / partager</button>` : '' };
     },
     onClose: () => { Object.values(st.urls).forEach((u) => URL.revokeObjectURL(u)); },
   });
   async function build(view) {
+    if (view === 'ai') { if (!sh.closed) sh.refresh(); return; }
     if (st.urls[view]) { if (!sh.closed) sh.refresh(); return; }
     try {
       st.pieces ||= await outfitPieceImages(o);
@@ -1035,13 +1061,46 @@ function openOutfitPreview(o, startView = 'stickers') {
     if (!sh.closed) sh.refresh();
   }
   build(st.view);
+  async function generateAI() {
+    const me = state.me || {};
+    let includeFace = false;
+    if (me.face) {
+      if (me.faceToAI) includeFace = true;
+      else {
+        const c = await dialog({ title: 'Envoyer ta photo à Google ?', text: 'Pour que l\'avatar te ressemble, ta photo de visage sera envoyée à Google Gemini. Sur l\'offre gratuite de Google, les images envoyées peuvent servir à améliorer leurs produits. Tu peux aussi générer un avatar sans ta photo.', buttons: [{ label: 'Envoyer ma photo', value: 'face', cls: 'btn-primary' }, { label: 'Sans ma photo', value: 'noface', cls: 'btn-ghost' }, { label: 'Annuler', value: false, cls: 'btn-ghost' }] });
+        if (!c) return;
+        if (c === 'face') { includeFace = true; await saveMe({ faceToAI: true }); }
+      }
+    }
+    st.aiBusy = true; st.aiErr = null; sh.refresh();
+    try {
+      st.pieces ||= await outfitPieceImages(o);
+      if (!st.pieces.length) throw new Error('Aucune pièce de cette tenue n\'existe plus dans ton dressing.');
+      const shot = async (img) => blobToBase64(await resizeTo(img, 448, 0.8));
+      const pieces = [];
+      for (const p of st.pieces) pieces.push({ role: p.role, name: p.name, color: p.colorLabel, ...(p.img ? { image: await shot(p.img), mime: 'image/jpeg' } : {}) });
+      let face;
+      if (includeFace) {
+        const fb = await blobOfPhoto(me.face);
+        if (fb) face = { image: await blobToBase64(await resizeTo(await loadImage(fb), 640, 0.82)), mime: 'image/jpeg' };
+      }
+      const prof = aiProfile();
+      const res = await api.avatar({ gender: gender(), skin: me.skin, profile: { heightCm: prof.heightCm, weightKg: prof.weightKg }, pieces, ...(face ? { face } : {}) });
+      const { mime, data } = extractImage(res);
+      const blob = b64ToBlob(data, mime);
+      st.blobs.ai = blob; st.urls.ai = URL.createObjectURL(blob);
+    } catch (e) { st.aiErr = e.message || 'Génération impossible.'; }
+    st.aiBusy = false;
+    if (!sh.closed) sh.refresh();
+  }
   sh.el.addEventListener('click', async (e) => {
+    if (e.target.closest('[data-ai-go]')) { generateAI(); return; }
     const pv = e.target.closest('[data-pv]');
     if (pv) { st.view = pv.dataset.pv; st.err = null; sh.refresh(); build(st.view); return; }
     if (e.target.closest('[data-go-profil]')) { e.preventDefault(); sh.close('force'); location.hash = '#/profil'; return; }
     const blob = st.blobs[st.view];
     if (!e.target.closest('[data-save-img]') || !blob) return;
-    const name = `${st.view === 'avatar' ? 'avatar' : 'tenue'}-${(o.title || 'mon-dressing').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'mon-dressing'}.png`;
+    const name = `${st.view === 'ai' ? 'avatar-ia' : st.view === 'avatar' ? 'avatar' : 'tenue'}-${(o.title || 'mon-dressing').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'mon-dressing'}.png`;
     const file = new File([blob], name, { type: 'image/png' });
     try {
       if (navigator.canShare?.({ files: [file] })) { await navigator.share({ files: [file], title: o.title }); return; }
@@ -1170,6 +1229,7 @@ function viewMe() {
       <div class="chips wrap">${STYLES.map((x) => `<button class="chip accent" data-act="me-style" data-v="${x.id}" aria-pressed="${(me.prefStyles || []).includes(x.id)}">${x.label}</button>`).join('')}</div></div>
     <div class="field"><label class="label" for="me-note">Mon style en quelques mots</label><input id="me-note" class="input" maxlength="120" placeholder="Ex. oversize, tons terre, un peu vintage" value="${esc(me.styleNote || '')}" autocomplete="off"></div>
     <label class="check-row"><input type="checkbox" id="me-share" ${me.share === false ? '' : 'checked'}><span><b>Adapter les coupes à ma morphologie</b><small>Envoie ma taille et mon poids à l'IA (Gemini) avec ma demande de tenue, rien d'autre. Ma photo n'est jamais envoyée.</small></span></label>
+    <label class="check-row" style="margin-top:12px"><input type="checkbox" id="me-faceai" ${me.faceToAI ? 'checked' : ''}><span><b>Autoriser l'avatar IA à utiliser ma photo de visage</b><small>Quand je génère un avatar IA, ma photo est envoyée à Google Gemini pour que l'image me ressemble. Sinon, elle ne quitte jamais mon téléphone. Je peux décocher à tout moment.</small></span></label>
     <p class="hint">Mes styles préférés et mes mots-clés sont utilisés par le styliste IA et par l'algorithme local.</p>
   </div>
 
@@ -1443,6 +1503,7 @@ document.addEventListener('change', async (e) => {
   }
   if (t.id === 'me-note') { await saveMe({ styleNote: t.value.trim().slice(0, 120) }); toast('Profil enregistré', { timeout: 1200 }); }
   if (t.id === 'me-share') { await saveMe({ share: t.checked }); }
+  if (t.id === 'me-faceai') { await saveMe({ faceToAI: t.checked }); }
   if (t.matches?.('[data-me-face]') && t.files?.[0]) {
     const file = t.files[0]; t.value = '';
     try {

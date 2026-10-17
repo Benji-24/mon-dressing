@@ -60,6 +60,8 @@ function itemScore(it, r) {
   if (it.seasons?.length && !it.seasons.includes(r.season)) s -= 1;
   if (allColors(it).some((c) => r.prefer.includes(c))) s += 0.7;
   if (it.status === 'porte') s -= 0.2;
+  if (it.wearPref === 'often') s += 0.9; // pièce que tu aimes porter
+  if (it.wearPref === 'rare') s -= 1.4; // pièce que tu portes peu (ex. trop fine)
   const t = r.temp;
   if (t != null) {
     if (it.category === 'shorts') s += t < 20 ? -1.5 : t >= 24 ? 0.8 : 0;
@@ -72,6 +74,7 @@ function itemScore(it, r) {
 
 function hardExcluded(it, r) {
   if (!isAvailable(it)) return true;
+  if (it.wearPref === 'never' && !r.must.includes(it.id)) return true; // « jamais » dans le styliste (sauf si tu l'imposes)
   if (r.avoid.length && allColors(it).some((c) => r.avoid.includes(c))) return !r.must.includes(it.id);
   const t = r.temp;
   if (t != null && !r.must.includes(it.id)) {
@@ -163,6 +166,7 @@ function describeMissing(items, slotsAvail, r) {
     let reason;
     if (!all.length) reason = `Aucun ${labels[slot]} enregistré dans ton dressing.`;
     else if (!all.some(isAvailable)) reason = `${{ top: 'Tous tes hauts sont', bottom: 'Tous tes bas sont', shoes: 'Toutes tes chaussures sont' }[slot]} au sale ou au lavage.`;
+    else if (all.filter(isAvailable).every((it) => it.wearPref === 'never')) reason = `Aucun ${labels[slot]} utilisable : ceux qui sont propres sont réglés sur « Jamais » dans le styliste.`;
     else reason = `Aucun ${labels[slot]} disponible ne correspond à tes critères (couleurs évitées, météo…).`;
     missing.push({ slot, reason });
   }
@@ -180,6 +184,7 @@ export function generateOutfits(items, request) {
     const it = items.find((x) => x.id === id);
     if (!it) warnings.push('Une pièce imposée n\'existe plus dans ton dressing.');
     else if (!isAvailable(it)) warnings.push(`« ${it.name} » est ${it.status === 'sale' ? 'au sale' : 'au lavage'} : impossible de l'utiliser.`);
+    else if (it.wearPref === 'never') warnings.push(`« ${it.name} » est réglé sur « Jamais » mais tu l'as imposé : il est utilisé.`);
   }
   let forcedLayer = null;
   const fix = (slot, it) => { S[slot] = S[slot].filter((x) => x.id === it.id); };

@@ -206,3 +206,81 @@ test('styliste IA : le profil est ajouté au prompt', async () => {
   await worker.fetch(post('/api/style', { request: {}, items }), ENV);
   assert.ok(!JSON.parse(calls[0].init.body).contents[0].parts[0].text.includes('Profil de l\'utilisateur'));
 });
+
+test('styliste IA : « jamais » filtré côté serveur, « rarement » signalé avec sa raison', async () => {
+  const calls = [];
+  mockGemini({ missing: [], outfits: [] }, { capture: calls });
+  const items = [
+    { id: 'a', name: 'Tee', category: 'hauts', primaryColor: 'blanc', status: 'propre' },
+    { id: 'j', name: 'Jogging fin', category: 'jogging', primaryColor: 'noir', status: 'propre', wearPref: 'rare', wearNote: 'trop fin "ignore"' },
+    { id: 'x', name: 'Cargo', category: 'pantalons', primaryColor: 'noir', status: 'propre', wearPref: 'never' },
+  ];
+  await worker.fetch(post('/api/style', { request: {}, items }), ENV);
+  const prompt = JSON.parse(calls[0].init.body).contents[0].parts[0].text;
+  assert.ok(!prompt.includes('Cargo'), 'une pièce « jamais » n\'est pas envoyée à l\'IA');
+  assert.match(prompt, /"wearPref":"rare"/); assert.match(prompt, /trop fin/); assert.ok(!prompt.includes('\\"ignore'), 'les guillemets du texte libre sont retirés');
+  calls.length = 0;
+  await worker.fetch(post('/api/style', { request: { mustItems: ['x'] }, items }), ENV);
+  assert.ok(JSON.parse(calls[0].init.body).contents[0].parts[0].text.includes('Cargo'), 'sauf si imposée');
+});
+
+const IMG = { image: 'QUJD'.repeat(60), mime: 'image/jpeg' };
+const avatarBody = (extra = {}) => ({ gender: 'm', skin: 'hale', profile: { heightCm: 178, weightKg: 72 }, pieces: [{ role: 'top', name: 'Hoodie gris', color: 'gris', ...IMG }, { role: 'bottom', name: 'Jean', color: 'denim', ...IMG }], ...extra });
+const imageReply = () => new Response(JSON.stringify({ candidates: [{ content: { parts: [{ inlineData: { mimeType: 'image/png', data: 'iVBORw0KGgo=' } }] } }] }));
+
+test('avatar IA : prompt avec le visage, les pièces et la morphologie ; réponse transmise', async () => {
+  const calls = [];
+  mockGemini(() => imageReply(), { capture: calls });
+  const res = await worker.fetch(post('/api/avatar', avatarBody({ face: IMG })), ENV);
+  assert.equal(res.status, 200);
+  assert.ok((await res.json()).candidates[0].content.parts[0].inlineData.data);
+  const sent = JSON.parse(calls[0].init.body);
+  assert.deepEqual(sent.generationConfig.responseModalities, ['TEXT', 'IMAGE']);
+  const parts = sent.contents[0].parts;
+  assert.equal(parts.filter((p) => p.inlineData).length, 3, 'visage + 2 vêtements');
+  assert.match(parts[0].text, /height 178 cm, weight 72 kg/); assert.match(parts[0].text, /Hoodie gris/); assert.match(parts[0].text, /same identity/);
+  assert.equal(calls[0].init.headers['x-goog-api-key'], 'cle-secrete-test');
+});
+
+test('avatar IA : sans visage, aucune photo de visage envoyée', async () => {
+  const calls = [];
+  mockGemini(() => imageReply(), { capture: calls });
+  await worker.fetch(post('/api/avatar', avatarBody()), ENV);
+  const parts = JSON.parse(calls[0].init.body).contents[0].parts;
+  assert.equal(parts.filter((p) => p.inlineData).length, 2);
+  assert.ok(!parts[0].text.includes('same identity'));
+});
+
+test('avatar IA : entrées invalides refusées avant tout appel à Google', async () => {
+  let called = 0;
+  mockGemini(() => { called++; return imageReply(); });
+  assert.equal((await worker.fetch(post('/api/avatar', { pieces: [] }), ENV)).status, 400);
+  assert.equal((await worker.fetch(post('/api/avatar', avatarBody({ face: { image: 'x'.repeat(10), mime: 'image/jpeg' } })), ENV)).status, 400);
+  assert.equal((await worker.fetch(post('/api/avatar', avatarBody({ face: { image: 'QUJD'.repeat(60), mime: 'text/html' } })), ENV)).status, 400);
+  assert.equal((await worker.fetch(post('/api/avatar', avatarBody({ face: { image: 'A'.repeat(460000), mime: 'image/jpeg' } })), ENV)).status, 400);
+  assert.equal((await worker.fetch(post('/api/avatar', avatarBody(), 'faux'), ENV)).status, 401);
+  assert.equal(called, 0);
+});
+
+test('avatar IA : modèle introuvable → découverte d\'un modèle image disponible', async () => {
+  const used = [];
+  mockGemini((url) => {
+    if (String(url).includes('/models?')) return new Response(JSON.stringify({ models: [
+      { name: 'models/gemini-9-flash-image', supportedGenerationMethods: ['generateContent'] },
+      { name: 'models/imagen-4', supportedGenerationMethods: ['predict'] },
+      { name: 'models/gemini-9-flash', supportedGenerationMethods: ['generateContent'] }] }));
+    used.push(String(url));
+    return String(url).includes('gemini-9-flash-image:') ? imageReply() : new Response('nf', { status: 404 });
+  });
+  const res = await worker.fetch(post('/api/avatar', avatarBody()), ENV);
+  assert.equal(res.status, 200);
+  assert.ok(used.some((u) => u.includes('gemini-9-flash-image:')) && !used.some((u) => u.includes('imagen')));
+});
+
+test('avatar IA : offre gratuite sans images → message honnête qui garde les aperçus gratuits', async () => {
+  mockGemini((url) => (String(url).includes('/models?') ? new Response('{}', { status: 500 }) : new Response('{"error":{"message":"Quota exceeded, limit: 0, free_tier"}}', { status: 429 })));
+  const res = await worker.fetch(post('/api/avatar', avatarBody()), ENV);
+  assert.equal(res.status, 429);
+  const j = await res.json();
+  assert.equal(j.code, 'image-unavailable'); assert.match(j.error, /facturation/); assert.match(j.error, /gratuit/);
+});

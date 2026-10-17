@@ -61,3 +61,31 @@ test('styliste local : le style préféré du profil départage à égalité', (
   assert.ok(a.outfits.length && b.outfits.length);
   assert.equal(b.outfits[0].slots.top, 't1');
 });
+
+const mkItem = (id, cat, extra = {}) => ({ id, name: id, category: cat, primaryColor: 'noir', style: 'casual', status: 'propre', seasons: ['automne'], fit: 'regular', ...extra });
+
+test('styliste local : une pièce « jamais » n\'est jamais proposée (sauf imposée)', () => {
+  const items = [mkItem('t', 'hauts'), mkItem('jogging', 'jogging', { wearPref: 'never' }), mkItem('jean', 'pantalons'), mkItem('s', 'chaussures')];
+  for (let i = 0; i < 5; i++) {
+    const r = generateOutfits(items, { occasion: 'quotidien', season: 'automne' });
+    assert.equal(r.outfits[0].slots.bottom, 'jean');
+  }
+  const forced = generateOutfits(items, { occasion: 'quotidien', season: 'automne', mustItems: ['jogging'] });
+  assert.equal(forced.outfits[0].slots.bottom, 'jogging');
+  assert.ok(forced.warnings.some((w) => /Jamais/.test(w)));
+});
+
+test('styliste local : « jamais » sur tous les bas → message explicite, rien d\'inventé', () => {
+  const items = [mkItem('t', 'hauts'), mkItem('jogging', 'jogging', { wearPref: 'never' }), mkItem('s', 'chaussures')];
+  const r = generateOutfits(items, { occasion: 'quotidien', season: 'automne' });
+  assert.equal(r.outfits.length, 0);
+  assert.ok(r.missing.some((m) => /Jamais/.test(m.reason)));
+});
+
+test('styliste local : « rarement » passe après, « souvent » avant', () => {
+  const base = [mkItem('t', 'hauts'), mkItem('s', 'chaussures')];
+  const a = generateOutfits([...base, mkItem('jogging', 'jogging', { wearPref: 'rare' }), mkItem('jean', 'pantalons')], { occasion: 'quotidien', season: 'automne' });
+  assert.equal(a.outfits[0].slots.bottom, 'jean');
+  const b = generateOutfits([...base, mkItem('jogging', 'jogging', { wearPref: 'often' }), mkItem('jean', 'pantalons')], { occasion: 'quotidien', season: 'automne' });
+  assert.equal(b.outfits[0].slots.bottom, 'jogging');
+});
